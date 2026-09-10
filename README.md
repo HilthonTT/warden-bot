@@ -1,8 +1,14 @@
-# Advanced Discord Mod & Ticket Bot
+# TheMonitorBot
 
-A `discord.py` 2.x bot with rich `/userinfo`, full moderation, automod with
-leet-speak-aware language filter, a spam-bot honeypot, and a persistent-button
-support-ticket system. State is stored in SQLite via `aiosqlite` (WAL mode).
+[![CI](https://github.com/HilthonTT/TheMonitorBot/actions/workflows/ci.yml/badge.svg)](https://github.com/HilthonTT/TheMonitorBot/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/HilthonTT/TheMonitorBot/actions/workflows/codeql.yml/badge.svg)](https://github.com/HilthonTT/TheMonitorBot/actions/workflows/codeql.yml)
+[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
+A `discord.py` 2.x bot with rich `/userinfo`, full moderation, automod with a
+leet-speak-aware language filter, a spam-bot honeypot, a persistent-button
+support-ticket system, voice playback, and trivia. State is stored in SQLite
+via `aiosqlite` (WAL mode).
 
 > **Terminology:** Discord's API and every library call them **guilds**.
 > The user-facing UI calls them **servers**. They're the same thing.
@@ -72,8 +78,22 @@ support-ticket system. State is stored in SQLite via `aiosqlite` (WAL mode).
 - `/volume <1-100>` — adjust playback volume
 - `/stop` — clear the queue and disconnect
 - One queue + playback loop per guild; auto-disconnects after 5 min idle
+  **and** as soon as the last human leaves the voice channel
 - Streams via `yt-dlp` and `FFmpeg` — no files are downloaded
-- Requires **FFmpeg** on `PATH` and `PyNaCl` (see Phase 1 step 3)
+- Stream URLs are re-resolved when a track reaches the front of the queue,
+  because they expire minutes after they are issued
+- Requires **FFmpeg** on `PATH` (already installed in the Docker image)
+
+### Trivia (`src/cogs/trivia.py`)
+
+- `/trivia` — a multiple-choice science & computing question from the Open
+  Trivia Database; first answer wins, buttons reveal the answer on timeout
+
+### Help (`src/cogs/documentation.py`)
+
+- `/documentation` — every command the invoker can actually run, grouped by
+  permission tier and generated from the live command tree, so it never
+  drifts from what is installed
 
 ### Configuration (`src/cogs/admin.py`)
 
@@ -124,7 +144,7 @@ Still in the developer portal:
 
 #### 3. Install Python dependencies
 
-Requires **Python 3.10 or newer** (uses PEP 604 unions and `slots=True`).
+Requires **Python 3.11 or newer** (the playback loop uses `asyncio.timeout`).
 From the project root:
 
 ```bash
@@ -141,9 +161,10 @@ pip install -r requirements.txt
 | `discord.py`    | Discord gateway + slash-command framework                 |
 | `python-dotenv` | Loads `.env` at startup                                   |
 | `aiosqlite`     | Async SQLite for config / warnings / tickets              |
-| `async-timeout` | 5-min idle timeout in the music player loop               |
+| `aiohttp`       | Non-blocking outbound HTTP (the trivia API)               |
 | `yt-dlp`        | Resolves YouTube (and other site) audio streams for music |
-| `PyNaCl`        | Voice packet encryption — required by `discord.py` for VC |
+
+`discord.py[voice]` pulls in `PyNaCl` for voice packet encryption.
 
 ##### Music cog system requirements
 
@@ -156,7 +177,8 @@ The music cog also needs two things **outside** of `pip`:
    - **macOS:** `brew install ffmpeg`
    - **Debian/Ubuntu:** `sudo apt install ffmpeg`
 2. **libopus** — bundled with `PyNaCl` wheels on Windows/macOS. On
-   minimal Linux images you may need `sudo apt install libopus0`.
+   minimal Linux images you may need `sudo apt install libopus0`. The
+   provided Docker image installs both already.
 
 If you don't intend to use voice, none of the above matters — the cog
 will simply fail to load and the rest of the bot will run.
@@ -168,7 +190,7 @@ Copy `.env.example` to `.env` and fill in at least the token:
 ```
 DISCORD_TOKEN=paste_the_token_from_step_1_here
 DEV_GUILD_ID=                    # optional — see below
-ACTIVITY_STATUS="Always monitoring your behavior"  # optional
+ACTIVITY_STATUS=Always monitoring your behavior     # optional
 BOT_DB_PATH=                     # optional — defaults to data/bot.sqlite3
 LOG_LEVEL=                       # optional — DEBUG/INFO/WARNING/ERROR
 ```
@@ -291,8 +313,19 @@ Shows everything currently set for this server.
 
 ### Docker (recommended)
 
-A `Dockerfile` and `docker-compose.yml` are included. The image runs as a
-non-root user and persists state to a `/data` volume.
+A `Dockerfile` and `docker-compose.yml` are included. The image is
+multi-stage, runs as a non-root user, ships FFmpeg and libopus for voice, and
+persists state to a `/data` volume.
+
+Every push to `main` and every `v*.*.*` tag publishes a multi-architecture
+image (amd64 + arm64) with build provenance to GitHub Container Registry, so
+you can skip the build entirely:
+
+```bash
+docker pull ghcr.io/hilthontt/themonitorbot:latest
+```
+
+To build locally instead:
 
 ```bash
 # Build and start. .env in the repo root is read for credentials.
@@ -347,40 +380,82 @@ bot is running.
 ```
 TheMonitorBot/
 ├── src/
-│   ├── bot.py                entry point
-│   ├── cogs/
-│   │   ├── user_info.py      /userinfo, /avatar, context menu
-│   │   ├── moderation.py     kick / ban / warn family
-│   │   ├── automod.py        bad-language filter + honeypot
-│   │   ├── tickets.py        ticket panel + private channels
-│   │   ├── admin.py          per-server config
-│   │   └── music/            voice playback (sub-package)
-│   │       ├── music.py      slash commands
-│   │       ├── music_player.py   per-guild queue + playback loop
-│   │       └── music_utils/  yt-dlp source + config + exceptions
-│   └── data/
-│       ├── db.py             aiosqlite layer (config / warnings / tickets)
-│       └── bad_words.txt     filter word list — edit freely
-├── Dockerfile
+│   ├── bot.py                    entry point: env, signals, exit codes
+│   ├── core/                     framework layer (no Discord features)
+│   │   ├── bot.py                MonitorBot: wiring, lifecycle, cog discovery
+│   │   ├── settings.py           environment parsed and validated once
+│   │   ├── checks.py             permission decorators, hierarchy guards
+│   │   ├── embeds.py             embed builders with Discord-safe truncation
+│   │   ├── responses.py          reply/fail/DM helpers
+│   │   ├── errors.py             global app-command error handler
+│   │   ├── constants.py          Discord API limits
+│   │   └── cog.py                MonitorCog base with typed services
+│   ├── services/                 cross-cutting concerns shared by cogs
+│   │   ├── guild_config.py       cached per-guild config (single owner)
+│   │   ├── modlog.py             mod-log delivery
+│   │   ├── escalation.py         warning-threshold auto-kick / auto-ban
+│   │   └── word_filter.py        obfuscation-tolerant matching
+│   ├── data/
+│   │   ├── db.py                 aiosqlite repository + migrations
+│   │   ├── models.py             GuildConfig / WarningRecord / Ticket
+│   │   └── bad_words.txt         filter word list — edit freely
+│   └── cogs/                     one Discord feature each, auto-discovered
+│       ├── admin.py              per-server config
+│       ├── moderation.py         kick / ban / warn family
+│       ├── automod.py            language filter + honeypot
+│       ├── tickets.py            ticket panel + private channels
+│       ├── user_info.py          /userinfo, /avatar, context menu
+│       ├── documentation.py      /documentation, generated from the tree
+│       ├── trivia.py             /trivia
+│       └── music/                voice playback (package)
+│           ├── music.py          slash commands
+│           ├── music_player.py   per-guild queue + playback loop
+│           ├── track.py          queued-track record
+│           └── music_utils/      yt-dlp resolution, FFmpeg options, errors
+├── tests/                        pytest suite (no network, no Discord)
+├── .github/workflows/            CI, release, CodeQL
+├── Dockerfile                    multi-stage, non-root, ffmpeg included
 ├── docker-compose.yml
-├── pyproject.toml            python>=3.10, ruff, mypy, pytest config
-├── requirements.txt
+├── pyproject.toml                python>=3.11, ruff, mypy, pytest config
+├── requirements.txt              runtime dependencies
+├── requirements-dev.txt          runtime + lint/type/test tooling
+├── CONTRIBUTING.md
+├── SECURITY.md
 ├── .env.example
 └── README.md
 ```
+
+### Layering
+
+```
+cogs  ->  services  ->  core / data
+```
+
+A cog may use any service; no cog reaches into another cog. Shared state
+(guild config, mod-log delivery, escalation) is owned by a service, so there
+is no load-order coupling and no cache to invalidate by hand.
 
 ---
 
 ## Development
 
-The project ships with `pyproject.toml` configuring ruff, mypy, and pytest:
-
 ```bash
-pip install ruff mypy pytest pytest-asyncio
-ruff check src/
-mypy src/
-pytest
+pip install -r requirements-dev.txt
+
+ruff check src tests          # lint
+ruff format --check src tests # formatting
+mypy                          # type check (config in pyproject.toml)
+pytest                        # unit tests + a cog-loading smoke test
 ```
+
+CI runs exactly these four commands on Python 3.11, 3.12, and 3.13, plus a
+Docker build. See [CONTRIBUTING.md](CONTRIBUTING.md) for the architecture
+rules and how to add a cog or a schema migration.
+
+The test suite never touches the network or Discord: it exercises the storage
+layer against a temporary SQLite file, the word filter, settings parsing,
+embed truncation, and loads every cog into a real `MonitorBot` instance to
+catch broken commands before deploy.
 
 ---
 
@@ -397,9 +472,12 @@ unset and you're waiting on global sync — give it up to an hour, or set
 **`Extension 'cogs.X' has no 'setup' function`.** Every cog must end with:
 
 ```python
-async def setup(bot: commands.Bot) -> None:
+async def setup(bot: MonitorBot) -> None:
     await bot.add_cog(MyCog(bot))
 ```
+
+A cog **package** needs an `__init__.py` that re-exports `setup`; without one
+it is skipped with a warning at startup.
 
 If you're authoring a new cog, copy that pattern from any existing one.
 
@@ -418,7 +496,7 @@ either FFmpeg is not on `PATH` (run `ffmpeg -version` to confirm) or your
 (`pip install -U yt-dlp`).
 
 **Music: bot joins VC but plays nothing.** Missing `PyNaCl` or libopus.
-Reinstall with `pip install --force-reinstall PyNaCl`.
+Reinstall with `pip install --force-reinstall "discord.py[voice]"`.
 
 **Reset everything.** Stop the bot and delete `data/bot.sqlite3` (plus the
 `-wal` and `-shm` sidecar files if present). All per-server config,
