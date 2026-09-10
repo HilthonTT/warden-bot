@@ -101,13 +101,13 @@ jobs:
           context: .
           push: false
           load: true
-          tags: themonitorbot:ci
+          tags: warden-bot:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Verify the bot imports inside the image
         run: |
-          docker run --rm --entrypoint python themonitorbot:ci -c "
+          docker run --rm --entrypoint python warden-bot:ci -c "
           import bot, core.bot, cogs.moderation, cogs.music, cogs.trivia
           print('import ok')
           "

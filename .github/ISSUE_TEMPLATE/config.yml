@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/HilthonTT/TheMonitorBot/security/advisories/new
+    url: https://github.com/HilthonTT/warden-bot/security/advisories/new
     about: Report privately through a GitHub security advisory. Do not open a public issue.
   - name: Setup question
-    url: https://github.com/HilthonTT/TheMonitorBot/discussions
+    url: https://github.com/HilthonTT/warden-bot/discussions
     about: Ask about configuration, permissions, or hosting.

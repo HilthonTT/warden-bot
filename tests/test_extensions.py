@@ -15,7 +15,7 @@ import pytest_asyncio
 from discord import app_commands
 
 import core.bot as core_bot
-from core.bot import MonitorBot, discover_extensions
+from core.bot import WardenBot, discover_extensions
 from core.settings import Settings
 
 COGS_DIR = Path(core_bot.__file__).resolve().parent.parent / "cogs"
@@ -58,22 +58,22 @@ EXPECTED_COMMANDS = {
 
 
 @pytest_asyncio.fixture
-async def bot(tmp_path: Path) -> AsyncIterator[MonitorBot]:
-    instance = MonitorBot(Settings(token="test", db_path=tmp_path / "bot.sqlite3"))
+async def bot(tmp_path: Path) -> AsyncIterator[WardenBot]:
+    instance = WardenBot(Settings(token="test", db_path=tmp_path / "bot.sqlite3"))
     try:
         yield instance
     finally:
         await instance.close()
 
 
-async def test_every_extension_loads(bot: MonitorBot) -> None:
+async def test_every_extension_loads(bot: WardenBot) -> None:
     for extension in discover_extensions(COGS_DIR):
         await bot.load_extension(extension)
 
     assert bot.cogs
 
 
-async def test_the_expected_command_tree_is_registered(bot: MonitorBot) -> None:
+async def test_the_expected_command_tree_is_registered(bot: WardenBot) -> None:
     for extension in discover_extensions(COGS_DIR):
         await bot.load_extension(extension)
 
@@ -81,7 +81,7 @@ async def test_the_expected_command_tree_is_registered(bot: MonitorBot) -> None:
     assert names >= EXPECTED_COMMANDS
 
 
-async def test_moderation_commands_declare_their_permissions(bot: MonitorBot) -> None:
+async def test_moderation_commands_declare_their_permissions(bot: WardenBot) -> None:
     await bot.load_extension("cogs.moderation")
 
     commands = {c.name: c for c in bot.tree.get_commands()}
@@ -93,7 +93,7 @@ async def test_moderation_commands_declare_their_permissions(bot: MonitorBot) ->
     assert ban.checks, "the runtime permission check must be attached too"
 
 
-async def test_the_user_info_context_menu_is_registered(bot: MonitorBot) -> None:
+async def test_the_user_info_context_menu_is_registered(bot: WardenBot) -> None:
     await bot.load_extension("cogs.user_info")
 
     assert any(
@@ -102,14 +102,14 @@ async def test_the_user_info_context_menu_is_registered(bot: MonitorBot) -> None
     )
 
 
-async def test_unloading_removes_the_context_menu(bot: MonitorBot) -> None:
+async def test_unloading_removes_the_context_menu(bot: WardenBot) -> None:
     await bot.load_extension("cogs.user_info")
     await bot.unload_extension("cogs.user_info")
 
     assert not bot.tree.get_commands()
 
 
-async def test_loading_an_extension_twice_is_refused(bot: MonitorBot) -> None:
+async def test_loading_an_extension_twice_is_refused(bot: WardenBot) -> None:
     await bot.load_extension("cogs.admin")
 
     with pytest.raises(Exception, match="already loaded"):

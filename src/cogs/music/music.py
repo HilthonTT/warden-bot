@@ -22,7 +22,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from core.cog import MonitorCog
+from core.cog import WardenCog
 from core.constants import EMBED_FIELD_VALUE_MAX, truncate
 from core.embeds import info_embed
 from core.responses import fail, reply
@@ -31,17 +31,17 @@ from .music_player import MusicPlayer
 from .music_utils import MusicError, resolve_track
 
 if TYPE_CHECKING:
-    from core.bot import MonitorBot
+    from core.bot import WardenBot
 
 log = logging.getLogger(__name__)
 
 QUEUE_PREVIEW = 10
 
 
-class Music(MonitorCog):
+class Music(WardenCog):
     """🎵 Music commands."""
 
-    def __init__(self, bot: MonitorBot) -> None:
+    def __init__(self, bot: WardenBot) -> None:
         super().__init__(bot)
         self.players: dict[int, MusicPlayer] = {}
 
@@ -345,5 +345,5 @@ class Music(MonitorCog):
         await self.teardown(member.guild.id)
 
 
-async def setup(bot: MonitorBot) -> None:
+async def setup(bot: WardenBot) -> None:
     await bot.add_cog(Music(bot))

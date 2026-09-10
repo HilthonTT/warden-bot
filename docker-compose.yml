@@ -3,8 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ghcr.io/hilthontt/themonitorbot:latest
-    container_name: themonitorbot
+    image: ghcr.io/hilthontt/warden-bot:latest
+    container_name: warden-bot
     restart: unless-stopped
     env_file:
       - .env

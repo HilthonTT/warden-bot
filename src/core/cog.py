@@ -10,17 +10,17 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to type checke
     from data.db import Database
     from services import EscalationService, GuildConfigService, ModLogService
 
-    from .bot import MonitorBot
+    from .bot import WardenBot
 
 
-class MonitorCog(commands.Cog):
-    """Cog base that carries a :class:`~core.bot.MonitorBot`.
+class WardenCog(commands.Cog):
+    """Cog base that carries a :class:`~core.bot.WardenBot`.
 
     Cogs used to reach services through ``self.bot.db  # type: ignore`` and
     ``bot.get_cog("AutoMod")``; both hid real coupling from the type checker.
     """
 
-    def __init__(self, bot: MonitorBot) -> None:
+    def __init__(self, bot: WardenBot) -> None:
         self.bot = bot
 
     @property

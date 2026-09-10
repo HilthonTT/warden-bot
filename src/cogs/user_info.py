@@ -14,13 +14,13 @@ from typing import TYPE_CHECKING
 import discord
 from discord import app_commands
 
-from core.cog import MonitorCog
+from core.cog import WardenCog
 from core.constants import EMBED_FIELD_VALUE_MAX, truncate
 from core.embeds import add_field, base_embed, info_embed
 from core.responses import fail, reply
 
 if TYPE_CHECKING:
-    from core.bot import MonitorBot
+    from core.bot import WardenBot
 
 log = logging.getLogger(__name__)
 
@@ -89,7 +89,7 @@ def timestamps(moment: object) -> str:
     return f"<t:{stamp}:F>\n(<t:{stamp}:R>)"
 
 
-async def fetch_full_user(bot: MonitorBot, user: AnyUser) -> discord.User | None:
+async def fetch_full_user(bot: WardenBot, user: AnyUser) -> discord.User | None:
     """Fetch the full user object, which alone carries banner/accent colour.
 
     Returns None when the fetch fails; the embed then simply omits those
@@ -135,7 +135,7 @@ def build_user_embed(target: AnyUser, full_user: discord.User | None) -> discord
         add_field(embed, "Account Type", " ".join(tags), inline=True)
 
     add_field(embed, "Badges", humanize_flags(target))
-    embed.set_footer(text="TheMonitorBot")
+    embed.set_footer(text="Warden")
     return embed
 
 
@@ -202,10 +202,10 @@ def build_asset_view(target: AnyUser, full_user: discord.User | None) -> discord
     return view
 
 
-class UserInfo(MonitorCog):
+class UserInfo(WardenCog):
     """User information commands."""
 
-    def __init__(self, bot: MonitorBot) -> None:
+    def __init__(self, bot: WardenBot) -> None:
         super().__init__(bot)
         self.ctx_menu = app_commands.ContextMenu(
             name="User Info",
@@ -354,5 +354,5 @@ class UserInfo(MonitorCog):
         )
 
 
-async def setup(bot: MonitorBot) -> None:
+async def setup(bot: WardenBot) -> None:
     await bot.add_cog(UserInfo(bot))

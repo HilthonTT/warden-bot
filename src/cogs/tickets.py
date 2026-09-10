@@ -10,7 +10,7 @@ Flow:
      plaintext transcript, delivers it, and deletes the channel.
 
 Both views are **persistent** — stable ``custom_id``s, ``timeout=None``, and
-``bot.add_view`` in :meth:`~core.bot.MonitorBot.setup_hook` — so buttons on
+``bot.add_view`` in :meth:`~core.bot.WardenBot.setup_hook` — so buttons on
 messages posted months ago still work after a restart.
 
 Concurrency: a per-(guild, user) lock serialises simultaneous clicks, and the
@@ -30,14 +30,14 @@ from discord import app_commands
 from discord.ext import commands
 
 from core.checks import guild_permissions
-from core.cog import MonitorCog
+from core.cog import WardenCog
 from core.constants import truncate
 from core.embeds import base_embed, info_embed
 from core.responses import fail, reply
 from data.models import Ticket
 
 if TYPE_CHECKING:
-    from core.bot import MonitorBot
+    from core.bot import WardenBot
 
 log = logging.getLogger(__name__)
 
@@ -110,10 +110,10 @@ class TicketCloseView(discord.ui.View):
         await cog.close_ticket(interaction)
 
 
-class Tickets(MonitorCog):
+class Tickets(WardenCog):
     """Support ticket commands and persistent button handlers."""
 
-    def __init__(self, bot: MonitorBot) -> None:
+    def __init__(self, bot: WardenBot) -> None:
         super().__init__(bot)
         self._open_locks: dict[tuple[int, int], asyncio.Lock] = {}
 
@@ -554,5 +554,5 @@ class Tickets(MonitorCog):
         return True
 
 
-async def setup(bot: MonitorBot) -> None:
+async def setup(bot: WardenBot) -> None:
     await bot.add_cog(Tickets(bot))

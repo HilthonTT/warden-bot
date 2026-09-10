@@ -18,13 +18,13 @@ import discord
 from discord import app_commands
 
 from core.checks import guild_permissions, hierarchy_error
-from core.cog import MonitorCog
+from core.cog import WardenCog
 from core.constants import AUDIT_REASON_MAX, EMBED_FIELD_VALUE_MAX, truncate
 from core.embeds import action_embed, add_field, base_embed
 from core.responses import fail, reply, try_dm
 
 if TYPE_CHECKING:
-    from core.bot import MonitorBot
+    from core.bot import WardenBot
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ def audit_reason(moderator: discord.abc.User, reason: str) -> str:
     return truncate(f"By {moderator} — {reason}", AUDIT_REASON_MAX)
 
 
-class Moderation(MonitorCog):
+class Moderation(WardenCog):
     """Moderation commands."""
 
     @app_commands.command(name="kick", description="Kick a member from the server.")
@@ -314,5 +314,5 @@ class Moderation(MonitorCog):
             await fail(interaction, f"No warning with ID `{warning_id}` in this server.")
 
 
-async def setup(bot: MonitorBot) -> None:
+async def setup(bot: WardenBot) -> None:
     await bot.add_cog(Moderation(bot))

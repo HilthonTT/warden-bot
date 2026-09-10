@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 Report privately through
-[GitHub security advisories](https://github.com/HilthonTT/TheMonitorBot/security/advisories/new).
+[GitHub security advisories](https://github.com/HilthonTT/warden-bot/security/advisories/new).
 Please do not open a public issue for anything that could be used to bypass
 moderation, escalate permissions, or expose a token.
 

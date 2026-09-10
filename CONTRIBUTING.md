@@ -53,7 +53,7 @@ cogs  ->  services  ->  core / data
 
 1. Create `src/cogs/<name>.py` (or a package with an `__init__.py` that
    exports `setup`). It is auto-discovered at startup — no registration list.
-2. Subclass `MonitorCog` to get typed `self.db`, `self.config`,
+2. Subclass `WardenCog` to get typed `self.db`, `self.config`,
    `self.modlog`, and `self.escalation`.
 3. Gate privileged commands with `@guild_permissions(...)`, which applies the
    Discord-side default permission, the server-side check, and guild-only

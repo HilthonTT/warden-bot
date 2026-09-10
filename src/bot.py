@@ -1,7 +1,7 @@
 """Entry point.
 
 Responsibilities are deliberately narrow: load the environment, build
-:class:`~core.bot.MonitorBot`, and translate startup failures into a message
+:class:`~core.bot.WardenBot`, and translate startup failures into a message
 an operator can act on. Everything else lives in ``core``, ``services``, and
 ``cogs``.
 
@@ -18,7 +18,7 @@ import sys
 import discord
 from dotenv import load_dotenv
 
-from core.bot import MonitorBot
+from core.bot import WardenBot
 from core.settings import ConfigError, Settings
 
 log = logging.getLogger("bot")
@@ -33,7 +33,7 @@ INTENTS_HELP = (
 )
 
 
-def _install_signal_handlers(loop: asyncio.AbstractEventLoop, bot: MonitorBot) -> None:
+def _install_signal_handlers(loop: asyncio.AbstractEventLoop, bot: WardenBot) -> None:
     """Close the bot cleanly on SIGTERM/SIGINT where the platform allows it.
 
     ``add_signal_handler`` is POSIX-only; on Windows we fall back to the
@@ -65,7 +65,7 @@ async def run() -> int:
     settings.configure_logging()
 
     loop = asyncio.get_running_loop()
-    async with MonitorBot(settings) as bot:
+    async with WardenBot(settings) as bot:
         _install_signal_handlers(loop, bot)
         try:
             await bot.start(settings.token)

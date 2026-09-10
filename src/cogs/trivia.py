@@ -18,13 +18,13 @@ import aiohttp
 import discord
 from discord import app_commands, ui
 
-from core.cog import MonitorCog
+from core.cog import WardenCog
 from core.constants import BUTTON_LABEL_MAX, truncate
 from core.embeds import base_embed, info_embed
 from core.responses import fail, reply
 
 if TYPE_CHECKING:
-    from core.bot import MonitorBot
+    from core.bot import WardenBot
 
 log = logging.getLogger(__name__)
 
@@ -134,7 +134,7 @@ class TriviaView(ui.View):
             log.debug("Could not edit the timed-out trivia message", exc_info=True)
 
 
-class Trivia(MonitorCog):
+class Trivia(WardenCog):
     """Trivia game."""
 
     async def fetch_question(self) -> TriviaQuestion | None:
@@ -183,5 +183,5 @@ class Trivia(MonitorCog):
         view.message = await interaction.original_response()
 
 
-async def setup(bot: MonitorBot) -> None:
+async def setup(bot: WardenBot) -> None:
     await bot.add_cog(Trivia(bot))

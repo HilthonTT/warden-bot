@@ -15,13 +15,13 @@ from typing import TYPE_CHECKING
 import discord
 from discord import app_commands
 
-from core.cog import MonitorCog
+from core.cog import WardenCog
 from core.constants import EMBED_FIELD_VALUE_MAX, EMBED_MAX_FIELDS
 from core.embeds import add_field, info_embed
 from core.responses import reply
 
 if TYPE_CHECKING:
-    from core.bot import MonitorBot
+    from core.bot import WardenBot
 
 TIERS: tuple[tuple[str, str | None], ...] = (
     ("📖 Everyone", None),
@@ -92,7 +92,7 @@ def chunk_lines(lines: list[str], limit: int = EMBED_FIELD_VALUE_MAX) -> list[st
     return blocks
 
 
-class Documentation(MonitorCog):
+class Documentation(WardenCog):
     """Self-documenting help."""
 
     @staticmethod
@@ -114,7 +114,7 @@ class Documentation(MonitorCog):
         grouped = group_by_tier(walk_commands(self.bot.tree.get_commands()))
 
         embed = info_embed(
-            "TheMonitorBot — Commands",
+            "Warden — Commands",
             "Commands you have access to in this server. Anything you can't run is hidden.",
         )
 
@@ -142,5 +142,5 @@ class Documentation(MonitorCog):
         await reply(interaction, embed=embed, ephemeral=True)
 
 
-async def setup(bot: MonitorBot) -> None:
+async def setup(bot: WardenBot) -> None:
     await bot.add_cog(Documentation(bot))

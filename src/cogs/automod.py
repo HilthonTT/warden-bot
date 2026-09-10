@@ -24,7 +24,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from core.checks import guild_permissions, is_staff
-from core.cog import MonitorCog
+from core.cog import WardenCog
 from core.constants import truncate
 from core.embeds import base_embed
 from core.responses import reply, try_dm
@@ -32,7 +32,7 @@ from data.models import GuildConfig
 from services.word_filter import WordFilter
 
 if TYPE_CHECKING:
-    from core.bot import MonitorBot
+    from core.bot import WardenBot
 
 log = logging.getLogger(__name__)
 
@@ -42,10 +42,10 @@ REASON_PREVIEW_CHARS = 200
 WARN_NOTICE_DELETE_AFTER = 8
 
 
-class AutoMod(MonitorCog):
+class AutoMod(WardenCog):
     """Bad-language filter and honeypot."""
 
-    def __init__(self, bot: MonitorBot) -> None:
+    def __init__(self, bot: WardenBot) -> None:
         super().__init__(bot)
         self.filter = WordFilter()
 
@@ -223,5 +223,5 @@ class AutoMod(MonitorCog):
         await reply(interaction, f"✅ Reloaded {count} word(s).", ephemeral=True)
 
 
-async def setup(bot: MonitorBot) -> None:
+async def setup(bot: WardenBot) -> None:
     await bot.add_cog(AutoMod(bot))

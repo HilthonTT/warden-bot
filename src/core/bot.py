@@ -51,10 +51,10 @@ def discover_extensions(cogs_dir: Path) -> list[str]:
     return extensions
 
 
-class MonitorBot(commands.Bot):
+class WardenBot(commands.Bot):
     """Owns the shared services every cog depends on.
 
-    Cogs reach these through :class:`core.cog.MonitorCog` rather than
+    Cogs reach these through :class:`core.cog.WardenCog` rather than
     ``bot.get_cog(...)``, so the dependency graph is explicit and there is no
     load-order coupling between cogs.
     """
@@ -89,7 +89,7 @@ class MonitorBot(commands.Bot):
         await self.db.connect()
         self._session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=15),
-            headers={"User-Agent": "TheMonitorBot (+https://github.com/HilthonTT/TheMonitorBot)"},
+            headers={"User-Agent": "warden-bot (+https://github.com/HilthonTT/warden-bot)"},
         )
 
         from cogs.tickets import TicketCloseView, TicketPanelView

@@ -1,7 +1,7 @@
-# TheMonitorBot
+# Warden
 
-[![CI](https://github.com/HilthonTT/TheMonitorBot/actions/workflows/ci.yml/badge.svg)](https://github.com/HilthonTT/TheMonitorBot/actions/workflows/ci.yml)
-[![CodeQL](https://github.com/HilthonTT/TheMonitorBot/actions/workflows/codeql.yml/badge.svg)](https://github.com/HilthonTT/TheMonitorBot/actions/workflows/codeql.yml)
+[![CI](https://github.com/HilthonTT/warden-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/HilthonTT/warden-bot/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/HilthonTT/warden-bot/actions/workflows/codeql.yml/badge.svg)](https://github.com/HilthonTT/warden-bot/actions/workflows/codeql.yml)
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -322,7 +322,7 @@ image (amd64 + arm64) with build provenance to GitHub Container Registry, so
 you can skip the build entirely:
 
 ```bash
-docker pull ghcr.io/hilthontt/themonitorbot:latest
+docker pull ghcr.io/hilthontt/warden-bot:latest
 ```
 
 To build locally instead:
@@ -348,14 +348,14 @@ For a non-containerised install on Linux, a minimal unit file looks like:
 
 ```ini
 [Unit]
-Description=TheMonitorBot
+Description=Warden Discord bot
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-WorkingDirectory=/srv/themonitorbot/src
-EnvironmentFile=/srv/themonitorbot/.env
-ExecStart=/srv/themonitorbot/venv/bin/python bot.py
+WorkingDirectory=/srv/warden-bot/src
+EnvironmentFile=/srv/warden-bot/.env
+ExecStart=/srv/warden-bot/venv/bin/python bot.py
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM
@@ -378,18 +378,18 @@ bot is running.
 ## Project layout
 
 ```
-TheMonitorBot/
+warden-bot/
 ├── src/
 │   ├── bot.py                    entry point: env, signals, exit codes
 │   ├── core/                     framework layer (no Discord features)
-│   │   ├── bot.py                MonitorBot: wiring, lifecycle, cog discovery
+│   │   ├── bot.py                WardenBot: wiring, lifecycle, cog discovery
 │   │   ├── settings.py           environment parsed and validated once
 │   │   ├── checks.py             permission decorators, hierarchy guards
 │   │   ├── embeds.py             embed builders with Discord-safe truncation
 │   │   ├── responses.py          reply/fail/DM helpers
 │   │   ├── errors.py             global app-command error handler
 │   │   ├── constants.py          Discord API limits
-│   │   └── cog.py                MonitorCog base with typed services
+│   │   └── cog.py                WardenCog base with typed services
 │   ├── services/                 cross-cutting concerns shared by cogs
 │   │   ├── guild_config.py       cached per-guild config (single owner)
 │   │   ├── modlog.py             mod-log delivery
@@ -454,7 +454,7 @@ rules and how to add a cog or a schema migration.
 
 The test suite never touches the network or Discord: it exercises the storage
 layer against a temporary SQLite file, the word filter, settings parsing,
-embed truncation, and loads every cog into a real `MonitorBot` instance to
+embed truncation, and loads every cog into a real `WardenBot` instance to
 catch broken commands before deploy.
 
 ---
@@ -472,7 +472,7 @@ unset and you're waiting on global sync — give it up to an hour, or set
 **`Extension 'cogs.X' has no 'setup' function`.** Every cog must end with:
 
 ```python
-async def setup(bot: MonitorBot) -> None:
+async def setup(bot: WardenBot) -> None:
     await bot.add_cog(MyCog(bot))
 ```
 

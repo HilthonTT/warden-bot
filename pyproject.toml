@@ -1,5 +1,5 @@
 [project]
-name = "themonitorbot"
+name = "warden-bot"
 version = "0.2.0"
 description = "Discord moderation, automod, ticketing, music, and trivia bot."
 readme = "README.md"
@@ -23,11 +23,11 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/HilthonTT/TheMonitorBot"
-Issues = "https://github.com/HilthonTT/TheMonitorBot/issues"
+Homepage = "https://github.com/HilthonTT/warden-bot"
+Issues = "https://github.com/HilthonTT/warden-bot/issues"
 
 [project.scripts]
-themonitorbot = "bot:main"
+warden-bot = "bot:main"
 
 [build-system]
 requires = ["setuptools>=68"]

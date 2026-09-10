@@ -15,12 +15,12 @@ import discord
 from discord import app_commands
 
 from core.checks import guild_permissions
-from core.cog import MonitorCog
+from core.cog import WardenCog
 from core.embeds import add_field, info_embed, success_embed
 from core.responses import fail, reply
 
 if TYPE_CHECKING:
-    from core.bot import MonitorBot
+    from core.bot import WardenBot
 
 HONEYPOT_ADVICE = (
     "For best results deny **View Channel** for @everyone, keep the channel out "
@@ -29,7 +29,7 @@ HONEYPOT_ADVICE = (
 )
 
 
-class Admin(MonitorCog):
+class Admin(WardenCog):
     """Server configuration."""
 
     @app_commands.command(
@@ -155,5 +155,5 @@ class Admin(MonitorCog):
         await reply(interaction, embed=embed, ephemeral=True)
 
 
-async def setup(bot: MonitorBot) -> None:
+async def setup(bot: WardenBot) -> None:
     await bot.add_cog(Admin(bot))
