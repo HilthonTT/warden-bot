@@ -1,26 +1,35 @@
+"""User-info commands.
+
+/userinfo [user] [ephemeral]  — full profile embed
+/avatar [user]                — avatar with per-format download links
+"User Info" context menu      — right-click a user → Apps → User Info
 """
-User-info commands.
- 
-Exposes:
-  /userinfo [user] [ephemeral]   — full profile embed
-  /avatar  [user]                — avatar showcase with format download buttons
-  Context menu "User Info"       — right-click on a user → Apps → User Info
-"""
+
 from __future__ import annotations
 
 import logging
-from typing import Optional
- 
+import re
+from typing import TYPE_CHECKING
+
 import discord
 from discord import app_commands
-from discord.ext import commands
- 
+
+from core.cog import MonitorCog
+from core.constants import EMBED_FIELD_VALUE_MAX, truncate
+from core.embeds import add_field, base_embed, info_embed
+from core.responses import fail, reply
+
+if TYPE_CHECKING:
+    from core.bot import MonitorBot
+
 log = logging.getLogger(__name__)
 
-# Cap username search across guild.members to bound CPU under abuse.
-USERNAME_SEARCH_LIMIT = 2_000
+USERNAME_SEARCH_LIMIT = 5_000
+ROLE_DISPLAY_LIMIT = 20
+ASSET_SIZE = 4096
 
-# Map PublicUserFlags attribute names -> (label, emoji)
+USER_MENTION_RE = re.compile(r"^<@!?(?P<id>\d{15,25})>$")
+
 FLAG_LABELS: dict[str, tuple[str, str]] = {
     "staff": ("Discord Staff", "🛡️"),
     "partner": ("Partnered Server Owner", "🤝"),
@@ -44,16 +53,20 @@ STATUS_EMOJI: dict[discord.Status, str] = {
     discord.Status.invisible: "⚫",
 }
 
-def humanize_flags(user: discord.User | discord.Member) -> str:
-    flags = user.public_flags
-    out = [
-        f"{emoji} {label}"
-        for attr, (label, emoji) in FLAG_LABELS.items()
-        if getattr(flags, attr, False)
-    ]
-    return "\n".join(out) if out else "—"
+AnyUser = discord.User | discord.Member
 
-def format_activity(activity: discord.BaseActivity | None) -> str:
+
+def humanize_flags(user: AnyUser) -> str:
+    flags = user.public_flags
+    badges = [
+        f"{emoji} {label}"
+        for attribute, (label, emoji) in FLAG_LABELS.items()
+        if getattr(flags, attribute, False)
+    ]
+    return "\n".join(badges) if badges else "—"
+
+
+def format_activity(activity: discord.BaseActivity | discord.Spotify | None) -> str:
     if activity is None:
         return "—"
     if isinstance(activity, discord.Spotify):
@@ -64,198 +77,197 @@ def format_activity(activity: discord.BaseActivity | None) -> str:
         return f"📺 Streaming **{activity.name}**"
     if isinstance(activity, discord.CustomActivity):
         emoji = f"{activity.emoji} " if activity.emoji else ""
-        text = (activity.name or "").strip()
-        return f"💭 {emoji}{text}".strip() or "—"
+        return f"💭 {emoji}{(activity.name or '').strip()}".strip() or "—"
     if isinstance(activity, discord.Activity):
         return f"📝 {activity.name}"
     return str(activity)
 
-async def build_user_embed(
-    bot: commands.Bot,
-    target: discord.User | discord.Member,
-) -> tuple[discord.Embed, discord.User]:
-    """Build a rich embed for a User or Member and return it alongside the
-    fully-fetched User object (which carries banner / accent_color)."""
-    full_user = await bot.fetch_user(target.id)
-    
-    # Prefer top-role color in a guild, then accent color, then blurple.
+
+def timestamps(moment: object) -> str:
+    """Render a datetime as absolute + relative Discord timestamps."""
+    stamp = int(moment.timestamp())  # type: ignore[attr-defined]
+    return f"<t:{stamp}:F>\n(<t:{stamp}:R>)"
+
+
+async def fetch_full_user(bot: MonitorBot, user: AnyUser) -> discord.User | None:
+    """Fetch the full user object, which alone carries banner/accent colour.
+
+    Returns None when the fetch fails; the embed then simply omits those
+    extras instead of the whole command failing.
+    """
+    try:
+        return await bot.fetch_user(user.id)
+    except discord.HTTPException:
+        log.debug("Could not fetch full user %s", user.id, exc_info=True)
+        return None
+
+
+def build_user_embed(target: AnyUser, full_user: discord.User | None) -> discord.Embed:
+    """Rich profile embed for a User or Member."""
     if isinstance(target, discord.Member) and target.color != discord.Color.default():
         color = target.color
-    elif full_user.accent_color is not None:
+    elif full_user is not None and full_user.accent_color is not None:
         color = full_user.accent_color
     else:
         color = discord.Color.blurple()
-        
-    embed = discord.Embed(
-        title=str(target),
-        color=color,
-        timestamp=discord.utils.utcnow(),
-    )
+
+    embed = base_embed(str(target), color=color)
     embed.set_thumbnail(url=target.display_avatar.url)
-    if full_user.banner is not None:
+    if full_user is not None and full_user.banner is not None:
         embed.set_image(url=full_user.banner.url)
-        
-    # --- Identity ---
-    embed.add_field(name="ID", value=f"`{target.id}`", inline=True)
-    embed.add_field(name="Username", value=f"@{target.name}", inline=True)
+
+    add_field(embed, "ID", f"`{target.id}`", inline=True)
+    add_field(embed, "Username", f"@{target.name}", inline=True)
     if target.global_name and target.global_name != target.name:
-        embed.add_field(name="Display Name", value=target.global_name, inline=True)
-        
-    # --- Account creation ---
-    created_ts = int(target.created_at.timestamp())
-    embed.add_field(
-        name="Account Created",
-        value=f"<t:{created_ts}:F>\n(<t:{created_ts}:R>)",
-        inline=True,
-    )
-    
-    # --- Member-specific fields ---
+        add_field(embed, "Display Name", target.global_name, inline=True)
+
+    add_field(embed, "Account Created", timestamps(target.created_at), inline=True)
+
     if isinstance(target, discord.Member):
-        if target.joined_at is not None:
-            joined_ts = int(target.joined_at.timestamp())
-            embed.add_field(
-                name="Joined Server",
-                value=f"<t:{joined_ts}:F>\n(<t:{joined_ts}:R>)",
-                inline=True,
-            )
-        if target.premium_since is not None:
-            boost_ts = int(target.premium_since.timestamp())
-            embed.add_field(
-                name="Boosting Since",
-                value=f"<t:{boost_ts}:R>",
-                inline=True,
-            )
- 
-        roles = [r for r in reversed(target.roles) if r.name != "@everyone"]
-        if roles:
-            roles_str = " ".join(r.mention for r in roles[:20])
-            if len(roles) > 20:
-                roles_str += f" *(+{len(roles) - 20} more)*"
-            embed.add_field(
-                name=f"Roles ({len(roles)})",
-                value=roles_str,
-                inline=False,
-            )
- 
-        embed.add_field(
-            name="Status",
-            value=f"{STATUS_EMOJI.get(target.status, '⚫')} {target.status.name.title()}",
-            inline=True,
-        )
-        primary_activity = next(
-            (a for a in target.activities if not isinstance(a, discord.CustomActivity)),
-            target.activity,
-        )
-        embed.add_field(name="Activity", value=format_activity(primary_activity), inline=True)
- 
-        if target.guild_permissions.administrator:
-            embed.add_field(name="Key Permission", value="👑 Administrator", inline=True)
- 
-    # --- Account flags ---
-    tags: list[str] = []
+        _add_member_fields(embed, target)
+
+    tags = []
     if target.bot:
         tags.append("🤖 Bot")
     if target.system:
         tags.append("⚙️ System")
     if tags:
-        embed.add_field(name="Account Type", value=" ".join(tags), inline=True)
- 
-    embed.add_field(name="Badges", value=humanize_flags(target), inline=False)
-    embed.set_footer(text="TheMonitorBot")
-    return embed, full_user
+        add_field(embed, "Account Type", " ".join(tags), inline=True)
 
-def build_asset_view(target: discord.User | discord.Member, full_user: discord.User) -> discord.ui.View:
-    """View with link buttons to the raw avatar / server avatar / banner."""
+    add_field(embed, "Badges", humanize_flags(target))
+    embed.set_footer(text="TheMonitorBot")
+    return embed
+
+
+def _add_member_fields(embed: discord.Embed, member: discord.Member) -> None:
+    if member.joined_at is not None:
+        add_field(embed, "Joined Server", timestamps(member.joined_at), inline=True)
+    if member.premium_since is not None:
+        add_field(
+            embed,
+            "Boosting Since",
+            f"<t:{int(member.premium_since.timestamp())}:R>",
+            inline=True,
+        )
+
+    roles = [role for role in reversed(member.roles) if not role.is_default()]
+    if roles:
+        shown = " ".join(role.mention for role in roles[:ROLE_DISPLAY_LIMIT])
+        if len(roles) > ROLE_DISPLAY_LIMIT:
+            shown += f" *(+{len(roles) - ROLE_DISPLAY_LIMIT} more)*"
+        add_field(embed, f"Roles ({len(roles)})", truncate(shown, EMBED_FIELD_VALUE_MAX))
+
+    add_field(
+        embed,
+        "Status",
+        f"{STATUS_EMOJI.get(member.status, '⚫')} {member.status.name.title()}",
+        inline=True,
+    )
+    primary = next(
+        (a for a in member.activities if not isinstance(a, discord.CustomActivity)),
+        member.activity,
+    )
+    add_field(embed, "Activity", format_activity(primary), inline=True)
+
+    if member.guild_permissions.administrator:
+        add_field(embed, "Key Permission", "👑 Administrator", inline=True)
+
+
+def build_asset_view(target: AnyUser, full_user: discord.User | None) -> discord.ui.View:
+    """Link buttons to the raw avatar / server avatar / banner."""
     view = discord.ui.View(timeout=None)
-    view.add_item(discord.ui.Button(
-        label="Avatar",
-        style=discord.ButtonStyle.link,
-        url=target.display_avatar.url,
-    ))
+    view.add_item(
+        discord.ui.Button(
+            label="Avatar",
+            style=discord.ButtonStyle.link,
+            url=target.display_avatar.url,
+        )
+    )
     if isinstance(target, discord.Member) and target.guild_avatar is not None:
-        view.add_item(discord.ui.Button(
-            label="Server Avatar",
-            style=discord.ButtonStyle.link,
-            url=target.guild_avatar.url,
-        ))
-    if full_user.banner is not None:
-        view.add_item(discord.ui.Button(
-            label="Banner",
-            style=discord.ButtonStyle.link,
-            url=full_user.banner.url,
-        ))
+        view.add_item(
+            discord.ui.Button(
+                label="Server Avatar",
+                style=discord.ButtonStyle.link,
+                url=target.guild_avatar.url,
+            )
+        )
+    if full_user is not None and full_user.banner is not None:
+        view.add_item(
+            discord.ui.Button(
+                label="Banner",
+                style=discord.ButtonStyle.link,
+                url=full_user.banner.url,
+            )
+        )
     return view
 
-class UserInfo(commands.Cog):
+
+class UserInfo(MonitorCog):
     """User information commands."""
-    
-    def __init__(self, bot: commands.Bot) -> None:
-        self.bot = bot
-        # Context menus must be registered as standalone app_commands; the
-        # decorator-style on cog methods only works with bot.tree.context_menu.
+
+    def __init__(self, bot: MonitorBot) -> None:
+        super().__init__(bot)
         self.ctx_menu = app_commands.ContextMenu(
             name="User Info",
-            callback=self._user_info_context,
+            callback=self.user_info_context,
         )
         self.bot.tree.add_command(self.ctx_menu)
-        
-    async def cog_unload(self) -> None: # graceful reload support
+
+    async def cog_unload(self) -> None:
         self.bot.tree.remove_command(self.ctx_menu.name, type=self.ctx_menu.type)
-        
+
     async def _resolve_target(
         self,
         interaction: discord.Interaction,
         query: str | None,
-    ) -> discord.User | discord.Member | None:
-        """Resolve mention / numeric ID / username to a User or Member.
- 
-        Order:
-          1. None                  -> the invoker
-          2. <@123> mention        -> strip & treat as ID
-          3. all-digit string      -> fetch by ID (member if in guild, else user)
-          4. plain name (in guild) -> match name / global_name / nickname
+    ) -> AnyUser | None:
+        """Resolve a mention, numeric ID, or username to a User/Member.
+
+        Order: no query -> the invoker; ``<@id>`` -> that ID; all digits ->
+        that ID (member first, then a REST fetch); otherwise a name match
+        against guild members.
         """
         if query is None:
             return interaction.user
-        
+
         query = query.strip()
-        
-        # Mention form <@id> or <@!id>
-        if query.startswith("<@") and query.endswith(">"):
-            query = query.strip("<@!>")
-            
-        # Numeric ID
+        if (match := USER_MENTION_RE.match(query)) is not None:
+            query = match.group("id")
+
         if query.isdigit():
-            uid = int(query)
-            if interaction.guild is not None:
-                member = interaction.guild.get_member(uid)
-                if member is not None:
-                    return member
-            try:
-                return await self.bot.fetch_user(uid)
-            except discord.NotFound:
-                return None
-            except discord.HTTPException as exc:
-                log.warning("fetch_user failed for %s: %s", uid, exc)
-                return None
-            
-        # Username search — only meaningful inside a guild
-        if interaction.guild is not None:
-            lowered = query.lower().lstrip("@")
-            for i, m in enumerate(interaction.guild.members):
-                if i >= USERNAME_SEARCH_LIMIT:
+            return await self._resolve_id(interaction, int(query))
+
+        wanted = query.lower().lstrip("@")
+        if wanted and interaction.guild is not None:
+            for index, member in enumerate(interaction.guild.members):
+                if index >= USERNAME_SEARCH_LIMIT:
+                    log.debug("Username search hit the scan limit in %s", interaction.guild.id)
                     break
-                if (
-                    m.name.lower() == lowered
-                    or (m.global_name and m.global_name.lower() == lowered)
-                    or (m.nick and m.nick.lower() == lowered)
-                ):
-                    return m
- 
+                if wanted in {
+                    member.name.lower(),
+                    (member.global_name or "").lower(),
+                    (member.nick or "").lower(),
+                }:
+                    return member
         return None
 
-    # ----- /userinfo -----
- 
+    async def _resolve_id(
+        self,
+        interaction: discord.Interaction,
+        user_id: int,
+    ) -> AnyUser | None:
+        if interaction.guild is not None:
+            member = interaction.guild.get_member(user_id)
+            if member is not None:
+                return member
+        try:
+            return await self.bot.fetch_user(user_id)
+        except discord.NotFound:
+            return None
+        except discord.HTTPException:
+            log.warning("fetch_user failed for %s", user_id, exc_info=True)
+            return None
+
     @app_commands.command(
         name="userinfo",
         description="Show detailed info about a user (mention, ID, or username).",
@@ -268,31 +280,24 @@ class UserInfo(commands.Cog):
     async def userinfo(
         self,
         interaction: discord.Interaction,
-        user: Optional[str] = None,
+        user: str | None = None,
         ephemeral: bool = False,
     ) -> None:
         await interaction.response.defer(ephemeral=ephemeral, thinking=True)
-        
+
         target = await self._resolve_target(interaction, user)
         if target is None:
-            await interaction.followup.send(
-                f"❌ Could not find a user matching `{user}`.",
-                ephemeral=True,
-            )
+            await fail(interaction, f"Could not find a user matching `{truncate(user or '', 80)}`.")
             return
-        
-        try:
-            embed, full_user = await build_user_embed(self.bot, target)
-            view = build_asset_view(target, full_user)
-            await interaction.followup.send(embed=embed, view=view, ephemeral=ephemeral)
-        except discord.HTTPException as exc:
-            log.exception("Failed building user info")
-            await interaction.followup.send(
-                f"⚠️ Discord API error: {exc}",
-                ephemeral=True,
-            )
-            
-    # ----- /avatar -----
+
+        full_user = await fetch_full_user(self.bot, target)
+        await reply(
+            interaction,
+            embed=build_user_embed(target, full_user),
+            view=build_asset_view(target, full_user),
+            ephemeral=ephemeral,
+        )
+
     @app_commands.command(
         name="avatar",
         description="Show a user's avatar with download links for each format.",
@@ -302,56 +307,52 @@ class UserInfo(commands.Cog):
     async def avatar(
         self,
         interaction: discord.Interaction,
-        user: Optional[str] = None,
+        user: str | None = None,
     ) -> None:
         await interaction.response.defer(thinking=True)
         target = await self._resolve_target(interaction, user)
         if target is None:
-            await interaction.followup.send(
-                f"❌ Could not find a user matching `{user}`.",
-                ephemeral=True,
-            )
+            await fail(interaction, f"Could not find a user matching `{truncate(user or '', 80)}`.")
             return
- 
-        embed = discord.Embed(
-            title=f"{target}'s avatar",
-            color=discord.Color.blurple(),
-        )
+
+        embed = info_embed(f"{target}'s avatar")
         embed.set_image(url=target.display_avatar.url)
-        
+
         view = discord.ui.View(timeout=None)
-        view.add_item(discord.ui.Button(
-            label="PNG",
-            style=discord.ButtonStyle.link,
-            url=target.display_avatar.replace(format="png", size=4096).url,
-        ))
-        view.add_item(discord.ui.Button(
-            label="WEBP",
-            style=discord.ButtonStyle.link,
-            url=target.display_avatar.replace(format="webp", size=4096).url,
-        ))
-        if target.display_avatar.is_animated():
-            view.add_item(discord.ui.Button(
-                label="GIF",
-                style=discord.ButtonStyle.link,
-                url=target.display_avatar.replace(format="gif", size=4096).url,
-            ))
- 
-        await interaction.followup.send(embed=embed, view=view)
-        
-    # ----- context menu callback -----
- 
-    async def _user_info_context(
+        asset = target.display_avatar
+        for fmt in ("png", "webp"):
+            view.add_item(
+                discord.ui.Button(
+                    label=fmt.upper(),
+                    style=discord.ButtonStyle.link,
+                    url=asset.replace(format=fmt, size=ASSET_SIZE).url,
+                )
+            )
+        if asset.is_animated():
+            view.add_item(
+                discord.ui.Button(
+                    label="GIF",
+                    style=discord.ButtonStyle.link,
+                    url=asset.replace(format="gif", size=ASSET_SIZE).url,
+                )
+            )
+
+        await reply(interaction, embed=embed, view=view)
+
+    async def user_info_context(
         self,
         interaction: discord.Interaction,
         member: discord.Member,
     ) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
-        embed, full_user = await build_user_embed(self.bot, member)
-        view = build_asset_view(member, full_user)
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
- 
- 
-async def setup(bot: commands.Bot) -> None:
+        full_user = await fetch_full_user(self.bot, member)
+        await reply(
+            interaction,
+            embed=build_user_embed(member, full_user),
+            view=build_asset_view(member, full_user),
+            ephemeral=True,
+        )
+
+
+async def setup(bot: MonitorBot) -> None:
     await bot.add_cog(UserInfo(bot))
-    

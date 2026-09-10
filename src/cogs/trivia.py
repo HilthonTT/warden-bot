@@ -1,111 +1,187 @@
+"""``/trivia`` — a multiple-choice question from the Open Trivia Database.
+
+The previous implementation called ``requests.get`` directly inside the
+command callback. That blocks the event loop for the entire round trip, which
+stalls *every* other command, the automod listener, and the voice keepalive.
+This version uses the bot's shared :class:`aiohttp.ClientSession`.
+"""
+
 from __future__ import annotations
 
-from typing import Any
+import html
 import logging
 import random
-import html
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any
+
+import aiohttp
 import discord
 from discord import app_commands, ui
-from discord.ext import commands
-import requests
 
-TRIVIA_URL = "https://opentdb.com/api.php?amount=1&category=18&type=multiple"
+from core.cog import MonitorCog
+from core.constants import BUTTON_LABEL_MAX, truncate
+from core.embeds import base_embed, info_embed
+from core.responses import fail, reply
 
-log = logging.getLogger("bot")
+if TYPE_CHECKING:
+    from core.bot import MonitorBot
 
-def decode_html(text: str) -> str:
-    return html.unescape(text)
+log = logging.getLogger(__name__)
+
+TRIVIA_URL = "https://opentdb.com/api.php"
+TRIVIA_PARAMS = {"amount": "1", "category": "18", "type": "multiple"}
+ANSWER_TIMEOUT = 60.0
+
+OPENTDB_SUCCESS = 0
+
+
+class TriviaQuestion:
+    """One normalised question from the API."""
+
+    __slots__ = ("answers", "category", "correct", "difficulty", "question")
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.question = html.unescape(payload["question"])
+        self.correct = html.unescape(payload["correct_answer"])
+        self.category = html.unescape(payload.get("category", "Unknown"))
+        self.difficulty = str(payload.get("difficulty", "unknown"))
+        self.answers = [html.unescape(answer) for answer in payload["incorrect_answers"]]
+        self.answers.append(self.correct)
+        random.shuffle(self.answers)
+
 
 class TriviaView(ui.View):
-    def __init__(self, correct_answer: str, answers: list[str]):
-        super().__init__(timeout=60)
-        self.correct_answer = correct_answer
-        self.answers = answers
-        self.answered = False
+    """Answer buttons for a single question. First answer settles the round."""
 
-        for i, answer in enumerate(answers):
-            # Truncate answer for button (Discord limit = 80 chars)
-            button_label = answer[:77] + "..." if len(answer) > 80 else answer
-            
-            button = ui.Button(
-                label=button_label,
+    def __init__(self, question: TriviaQuestion) -> None:
+        super().__init__(timeout=ANSWER_TIMEOUT)
+        self.question = question
+        self.answered = False
+        self.message: discord.Message | None = None
+
+        for index, answer in enumerate(question.answers):
+            button: ui.Button[ui.View] = ui.Button(
+                label=truncate(answer, BUTTON_LABEL_MAX),
                 style=discord.ButtonStyle.primary,
-                custom_id=f"answer_{i}"
+                row=index // 2,
             )
-            button.callback = self.create_callback(answer)
+            button.callback = self._make_callback(button, answer)  # type: ignore[assignment,method-assign]
             self.add_item(button)
 
-    def create_callback(self, selected_answer: str):
-        async def callback(interaction: discord.Interaction):
+    def _make_callback(
+        self,
+        button: ui.Button[ui.View],
+        answer: str,
+    ) -> Callable[[discord.Interaction], Awaitable[None]]:
+        async def callback(interaction: discord.Interaction) -> None:
             if self.answered:
-                await interaction.response.send_message("You already answered!", ephemeral=True)
-                return
-
-            self.answered = True
-            self.disable_all_buttons()
-
-            is_correct = selected_answer == self.correct_answer
-
-            if is_correct:
-                embed = discord.Embed(title="✅ Correct Answer!", color=discord.Color.green())
-            else:
-                embed = discord.Embed(
-                    title="❌ Wrong Answer",
-                    description=f"The correct answer was:\n**{self.correct_answer}**",
-                    color=discord.Color.red()
+                await interaction.response.send_message(
+                    "Someone already answered this one!",
+                    ephemeral=True,
                 )
+                return
+            self.answered = True
+            self.stop()
 
+            correct = answer == self.question.correct
+            self._settle(highlight=button, correct=correct)
+
+            if correct:
+                embed = base_embed(
+                    "✅ Correct!",
+                    color=discord.Color.green(),
+                    description=f"{interaction.user.mention} got it: **{answer}**",
+                )
+            else:
+                embed = base_embed(
+                    "❌ Wrong answer",
+                    color=discord.Color.red(),
+                    description=(
+                        f"{interaction.user.mention} answered **{answer}**.\n"
+                        f"The correct answer was **{self.question.correct}**."
+                    ),
+                )
             await interaction.response.edit_message(embed=embed, view=self)
 
         return callback
 
-    def disable_all_buttons(self):
+    def _settle(self, *, highlight: ui.Button[ui.View] | None, correct: bool) -> None:
+        """Disable every button and colour the outcome."""
         for child in self.children:
-            if isinstance(child, ui.Button):
-                child.disabled = True
+            if not isinstance(child, ui.Button):
+                continue
+            child.disabled = True
+            if child.label == truncate(self.question.correct, BUTTON_LABEL_MAX):
+                child.style = discord.ButtonStyle.success
+            elif child is highlight and not correct:
+                child.style = discord.ButtonStyle.danger
+            else:
+                child.style = discord.ButtonStyle.secondary
+
+    async def on_timeout(self) -> None:
+        """Reveal the answer instead of leaving live buttons on a dead round."""
+        if self.answered or self.message is None:
+            return
+        self._settle(highlight=None, correct=False)
+        embed = base_embed(
+            "⏰ Time's up",
+            color=discord.Color.greyple(),
+            description=f"The correct answer was **{self.question.correct}**.",
+        )
+        try:
+            await self.message.edit(embed=embed, view=self)
+        except discord.HTTPException:
+            log.debug("Could not edit the timed-out trivia message", exc_info=True)
 
 
-class Trivia(commands.Cog):
-    def __init__(self, bot: commands.Bot) -> None:
-        self.bot = bot
+class Trivia(MonitorCog):
+    """Trivia game."""
 
-    @app_commands.command(name="trivia", description="Play a science & computers trivia question")
+    async def fetch_question(self) -> TriviaQuestion | None:
+        """Fetch one question, or None if the API is unavailable/empty."""
+        async with self.bot.session.get(TRIVIA_URL, params=TRIVIA_PARAMS) as response:
+            response.raise_for_status()
+            payload = await response.json(content_type=None)
+
+        if payload.get("response_code") != OPENTDB_SUCCESS or not payload.get("results"):
+            log.warning("Trivia API returned no question: %s", payload.get("response_code"))
+            return None
+        return TriviaQuestion(payload["results"][0])
+
+    @app_commands.command(
+        name="trivia",
+        description="Play a science & computers trivia question.",
+    )
     @app_commands.checks.cooldown(3, 10.0, key=lambda i: i.user.id)
-    async def trivia(self, interaction: discord.Interaction):
-        await interaction.response.defer()
+    async def trivia(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(thinking=True)
 
         try:
-            res = requests.get(TRIVIA_URL, timeout=10)
-            res.raise_for_status()
-            data: dict[Any, Any] = res.json()
+            question = await self.fetch_question()
+        except (TimeoutError, aiohttp.ClientError):
+            log.warning("Trivia API request failed", exc_info=True)
+            await fail(interaction, "The trivia service isn't responding. Try again shortly.")
+            return
+        except (KeyError, ValueError):
+            log.exception("Unexpected trivia API payload")
+            await fail(interaction, "The trivia service sent something I couldn't read.")
+            return
 
-            if not data.get("results"):
-                await interaction.followup.send("❌ Failed to fetch trivia.")
-                return
+        if question is None:
+            await fail(interaction, "The trivia service had no question for me. Try again.")
+            return
 
-            q = data["results"][0]
+        embed = info_embed("🧠 Trivia Question", question.question)
+        embed.set_footer(
+            text=(
+                f"{question.category} • {question.difficulty} • {int(ANSWER_TIMEOUT)}s to answer"
+            ),
+        )
 
-            question_text = decode_html(q['question'])
-            correct = decode_html(q['correct_answer'])
-            incorrects = [decode_html(ans) for ans in q['incorrect_answers']]
+        view = TriviaView(question)
+        await reply(interaction, embed=embed, view=view)
+        view.message = await interaction.original_response()
 
-            all_answers = [correct] + incorrects
-            random.shuffle(all_answers)
 
-            embed = discord.Embed(
-                title="🧠 Trivia Question",
-                description=question_text,
-                color=discord.Color.blue()
-            )
-            embed.set_footer(text=f"Category: {q.get('category')} | 60 seconds to answer")
-
-            view = TriviaView(correct_answer=correct, answers=all_answers)
-
-            await interaction.followup.send(embed=embed, view=view)
-
-        except Exception as e:
-            log.error(f"Trivia command failed: {e}", exc_info=True)
-            await interaction.followup.send("❌ An error occurred while fetching the question.")
-
-async def setup(bot: commands.Bot) -> None:
+async def setup(bot: MonitorBot) -> None:
     await bot.add_cog(Trivia(bot))

@@ -1,126 +1,108 @@
-"""
-Help / documentation command.
+"""``/documentation`` — a help command generated from the live command tree.
 
-Lists every slash command the invoker can actually use in the current
-guild, grouped by permission tier. Tiers are gated on Discord guild
-permissions (the same ones each command's @default_permissions declares),
-so a regular member only sees the public commands while a mod / admin
-sees everything they can run.
+The previous version kept a hand-written list of every command and its
+summary, which drifted the moment a cog was added: ``/trivia`` and the whole
+music cog were missing from it. Here the listing is derived from the commands
+actually registered on the tree, grouped by the permission each one declares,
+so a new command shows up the moment it is loaded.
 """
+
 from __future__ import annotations
 
-import logging
-from dataclasses import dataclass
-from typing import Callable
+from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 import discord
 from discord import app_commands
-from discord.ext import commands
 
-log = logging.getLogger(__name__)
+from core.cog import MonitorCog
+from core.constants import EMBED_FIELD_VALUE_MAX, EMBED_MAX_FIELDS
+from core.embeds import add_field, info_embed
+from core.responses import reply
 
-# Embeds cap at 25 fields and 6000 chars total; we stay well under both
-# by listing each command as a single line inside one field per tier.
-MAX_FIELD_VALUE = 1024
+if TYPE_CHECKING:
+    from core.bot import MonitorBot
 
-
-@dataclass(frozen=True)
-class CommandDoc:
-    name: str
-    summary: str
-
-
-@dataclass(frozen=True)
-class Tier:
-    title: str
-    # Predicate against discord.Permissions. None = visible to everyone.
-    check: Callable[[discord.Permissions], bool] | None
-    commands: tuple[CommandDoc, ...]
-
-
-TIERS: tuple[Tier, ...] = (
-    Tier(
-        title="📖 Everyone",
-        check=None,
-        commands=(
-            CommandDoc("/documentation", "Show this help message."),
-            CommandDoc("/userinfo", "Show detailed info about a user (mention, ID, or username)."),
-            CommandDoc("/avatar", "Show a user's avatar with download links for each format."),
-            CommandDoc("/ticket_open", "Open a support ticket (alternative to the panel button)."),
-            CommandDoc("/ticket_close", "Close the current ticket channel (opener or staff)."),
-        ),
-    ),
-    Tier(
-        title="🛡️ Moderator — Kick Members",
-        check=lambda p: p.kick_members,
-        commands=(
-            CommandDoc("/kick", "Kick a member from the server."),
-            CommandDoc("/warn", "Warn a member (counts toward auto-kick / auto-ban thresholds)."),
-            CommandDoc("/warnings", "List a user's warnings."),
-            CommandDoc("/delwarn", "Delete a single warning by ID."),
-        ),
-    ),
-    Tier(
-        title="⚖️ Senior Moderator — Ban Members",
-        check=lambda p: p.ban_members,
-        commands=(
-            CommandDoc("/ban", "Ban a user from the server (member or external user ID)."),
-            CommandDoc("/unban", "Unban a user by ID."),
-            CommandDoc("/clearwarnings", "Clear all warnings for a user."),
-        ),
-    ),
-    Tier(
-        title="🎟️ Staff — Manage Channels",
-        check=lambda p: p.manage_channels,
-        commands=(
-            CommandDoc("/ticket_add", "Add a user to the current ticket channel."),
-            CommandDoc("/ticket_remove", "Remove a user from the current ticket channel."),
-        ),
-    ),
-    Tier(
-        title="👑 Administrator — Manage Server",
-        check=lambda p: p.manage_guild,
-        commands=(
-            CommandDoc("/config", "Show the current bot configuration for this server."),
-            CommandDoc("/set_modlog", "Set the channel where moderation actions are logged."),
-            CommandDoc("/set_honeypot", "Arm a channel as a honeypot — anyone who posts there is auto-banned."),
-            CommandDoc("/clear_honeypot", "Disarm the honeypot for this server."),
-            CommandDoc("/set_warn_thresholds", "Set the auto-kick and auto-ban warning thresholds."),
-            CommandDoc("/automod", "Toggle the bad-language auto-filter."),
-            CommandDoc("/automod_reload", "Reload the bad-words list from disk without restarting."),
-            CommandDoc("/ticket_panel", "Post an Open-Ticket panel in this channel."),
-            CommandDoc("/ticket_config", "Configure the ticket system (category & staff role)."),
-        ),
-    ),
+TIERS: tuple[tuple[str, str | None], ...] = (
+    ("📖 Everyone", None),
+    ("🛡️ Moderator — Kick Members", "kick_members"),
+    ("⚖️ Senior Moderator — Ban Members", "ban_members"),
+    ("🎟️ Staff — Manage Channels", "manage_channels"),
+    ("👑 Administrator — Manage Server", "manage_guild"),
 )
+OTHER_TIER = "🔒 Other"
 
 
-def _format_tier(tier: Tier) -> str:
-    """Render a tier's commands into one embed-field value, truncating if
-    it would exceed Discord's 1024-char field cap (defensive — current
-    content fits comfortably)."""
-    lines = [f"`{cmd.name}` — {cmd.summary}" for cmd in tier.commands]
-    body = "\n".join(lines)
-    if len(body) <= MAX_FIELD_VALUE:
-        return body
-    # Trim from the end and add an ellipsis marker.
-    truncated: list[str] = []
-    running = 0
-    suffix = "\n… (truncated)"
-    budget = MAX_FIELD_VALUE - len(suffix)
+def required_permission(command: app_commands.Command) -> str | None:
+    """Return the tier permission a command is gated on, if any.
+
+    Reads ``@app_commands.default_permissions``, which
+    :func:`core.checks.guild_permissions` sets alongside the runtime check.
+    """
+    declared = getattr(command, "default_permissions", None)
+    if declared is None:
+        return None
+    for _, permission in TIERS:
+        if permission is not None and getattr(declared, permission, False):
+            return permission
+    return OTHER_TIER
+
+
+def walk_commands(
+    commands: Iterable[app_commands.Command | app_commands.Group | app_commands.ContextMenu],
+) -> list[app_commands.Command]:
+    """Flatten groups into leaf commands, dropping context menus.
+
+    Context menus are invoked by right-clicking, not by name, so they are
+    mentioned in the footer instead of listed as slash commands.
+    """
+    leaves: list[app_commands.Command] = []
+    for command in commands:
+        if isinstance(command, app_commands.Group):
+            leaves.extend(walk_commands(command.commands))
+        elif isinstance(command, app_commands.Command):
+            leaves.append(command)
+    return leaves
+
+
+def group_by_tier(
+    commands: Iterable[app_commands.Command],
+) -> dict[str | None, list[app_commands.Command]]:
+    grouped: dict[str | None, list[app_commands.Command]] = {}
+    for command in commands:
+        grouped.setdefault(required_permission(command), []).append(command)
+    for entries in grouped.values():
+        entries.sort(key=lambda c: c.qualified_name)
+    return grouped
+
+
+def chunk_lines(lines: list[str], limit: int = EMBED_FIELD_VALUE_MAX) -> list[str]:
+    """Pack lines into embed-field-sized blocks without splitting a line."""
+    blocks: list[str] = []
+    current: list[str] = []
+    length = 0
     for line in lines:
-        if running + len(line) + 1 > budget:
-            break
-        truncated.append(line)
-        running += len(line) + 1
-    return "\n".join(truncated) + suffix
+        if current and length + len(line) + 1 > limit:
+            blocks.append("\n".join(current))
+            current, length = [], 0
+        current.append(line)
+        length += len(line) + 1
+    if current:
+        blocks.append("\n".join(current))
+    return blocks
 
 
-class Documentation(commands.Cog):
-    """Documentation commands."""
+class Documentation(MonitorCog):
+    """Self-documenting help."""
 
-    def __init__(self, bot: commands.Bot) -> None:
-        self.bot = bot
+    @staticmethod
+    def _visible(perms: discord.Permissions, permission: str | None) -> bool:
+        """Whether a tier should be shown to a member with ``perms``."""
+        if permission is None:
+            return True
+        if permission == OTHER_TIER:
+            return perms.administrator
+        return getattr(perms, permission, False)
 
     @app_commands.command(
         name="documentation",
@@ -128,51 +110,37 @@ class Documentation(commands.Cog):
     )
     @app_commands.guild_only()
     async def documentation(self, interaction: discord.Interaction) -> None:
-        # Outside a guild the user has no guild perms — only the public tier shows.
-        if isinstance(interaction.user, discord.Member):
-            perms = interaction.user.guild_permissions
-        else:
-            perms = discord.Permissions.none()
+        perms = interaction.permissions
+        grouped = group_by_tier(walk_commands(self.bot.tree.get_commands()))
 
-        # Administrators see everything regardless of which specific bit a
-        # tier checks — Discord treats administrator as implying all perms,
-        # but discord.Permissions.kick_members on an admin-only role still
-        # returns False, so handle it explicitly.
-        is_admin = perms.administrator
-
-        embed = discord.Embed(
-            title="TheMonitorBot — Commands",
-            description=(
-                "Slash commands you have access to in this server. "
-                "Commands you can't run are hidden."
-            ),
-            color=discord.Color.blurple(),
+        embed = info_embed(
+            "TheMonitorBot — Commands",
+            "Commands you have access to in this server. Anything you can't run is hidden.",
         )
 
-        included = 0
-        for tier in TIERS:
-            if tier.check is not None and not is_admin and not tier.check(perms):
+        fields = 0
+        for title, permission in (*TIERS, (OTHER_TIER, OTHER_TIER)):
+            entries = grouped.get(permission, [])
+            if not entries or not self._visible(perms, permission):
                 continue
-            embed.add_field(
-                name=tier.title,
-                value=_format_tier(tier),
-                inline=False,
+
+            lines = [f"`/{c.qualified_name}` — {c.description}" for c in entries]
+            for index, block in enumerate(chunk_lines(lines)):
+                if fields >= EMBED_MAX_FIELDS:
+                    break
+                add_field(embed, title if index == 0 else f"{title} (cont.)", block)
+                fields += 1
+
+        if fields == 0:
+            add_field(
+                embed,
+                "No commands available",
+                "You don't have access to any commands in this server.",
             )
-            included += 1
 
-        if included == 0:
-            # Should never happen — the Everyone tier has no gate — but
-            # guard so the user never sees an empty embed.
-            embed.add_field(
-                name="No commands available",
-                value="You don't have access to any commands in this server.",
-                inline=False,
-            )
-
-        embed.set_footer(text="Tip: most commands offer auto-complete in the slash UI.")
-
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        embed.set_footer(text="Right-click a user → Apps → User Info also works.")
+        await reply(interaction, embed=embed, ephemeral=True)
 
 
-async def setup(bot: commands.Bot) -> None:
+async def setup(bot: MonitorBot) -> None:
     await bot.add_cog(Documentation(bot))
