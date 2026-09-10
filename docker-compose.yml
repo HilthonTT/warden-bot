@@ -1,7 +1,9 @@
 services:
   bot:
-    build: .
-    image: themonitorbot:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/hilthontt/themonitorbot:latest
     container_name: themonitorbot
     restart: unless-stopped
     env_file:
@@ -10,6 +12,11 @@ services:
       - bot-data:/data
     stop_grace_period: 30s
     init: true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   bot-data:
