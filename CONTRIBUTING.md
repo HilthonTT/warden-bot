@@ -45,7 +45,8 @@ cogs  ->  services  ->  core / data
 - `data/` — SQLite storage and the records it returns. Cogs never see a raw
   database row.
 - `services/` — cross-cutting concerns owned by nobody in particular: guild
-  config caching, mod-log delivery, warning escalation, the word filter.
+  config caching, mod-log delivery, warning escalation, the word filter, and
+  the spam and raid trackers.
 - `cogs/` — one Discord feature each. A cog may depend on services; it must
   never reach into another cog with `bot.get_cog(...)`.
 
@@ -64,8 +65,11 @@ cogs  ->  services  ->  core / data
 
 ### Changing the schema
 
-Append a step to `MIGRATIONS` in `src/data/db.py` and bump `SCHEMA_VERSION`
-in the same commit. Never edit a migration that has already shipped.
+Append a step to `MIGRATIONS` in `src/data/db.py`, update `BASE_SCHEMA` to
+match (fresh databases are built from it and stamped, never migrated), and
+bump `SCHEMA_VERSION` — all in the same commit. Never edit a migration that
+has already shipped, and add a case to `tests/test_migration.py`, which builds
+a database at the old schema and asserts nothing is lost.
 
 ## Commit and PR conventions
 

@@ -26,8 +26,17 @@ via `aiosqlite` (WAL mode).
 ### Moderation (`src/cogs/moderation.py`)
 
 - `/kick`, `/ban`, `/unban` with reason + DM-before-action
+- `/timeout` and `/untimeout` — Discord's native timeout, with durations
+  written the way moderators think (`10m`, `2h30m`, `7d`)
+- `/tempban` — a ban that lifts itself; a background sweeper unbans on expiry
+  and retries after a restart rather than leaving someone banned forever
+- `/purge` — bulk delete, optionally filtered to one member or a substring
 - `/warn` with DM and persistent record
-- `/warnings`, `/clearwarnings`, `/delwarn`
+- `/warnings` (paginated), `/clearwarnings`, `/delwarn`
+- **Case log** — every action gets a per-server case number. `/case <n>` looks
+  one up; `/cases @user` shows a member's full history, paginated
+- **Warning expiry** — `/set_warn_expiry` makes warnings stop counting toward
+  auto-kick and auto-ban after N days, so stale history can't remove someone
 - Hierarchy & self-protection checks (no banning the owner, no banning above the bot's role, etc.)
 - Auto-escalation: configurable kick and ban warning thresholds
 - All commands defer the interaction before slow REST/DM work, so they never
@@ -40,10 +49,37 @@ via `aiosqlite` (WAL mode).
   punctuation/spacing squashed (`f.u.c.k`)
 - Whole-word matching via `\b` boundaries to minimize false positives
 - Staff (Manage Messages or the configured staff role) are exempt
-- Words live in `src/data/bad_words.txt`; `/automod_reload` picks up edits live
+- **Per-server word lists** — `src/data/bad_words.txt` seeds every server and
+  `/words add|remove|list|reset` tailors it per community; `/automod_reload`
+  picks up edits to the shipped defaults live
+- **Rate-based spam filter** (`/antispam`) — message flooding, repeated
+  messages, and mass mentions, none of which a word list can see. One flood
+  produces one warning, not one per message
+- **Invite filter** — optional blocking of links to other Discord servers
 - `/automod` toggle per server
 - Per-guild config is cached in memory and invalidated on writes, so the
   filter doesn't hit SQLite on every message
+
+### Channel controls (`src/cogs/channels.py`)
+
+- `/lock` and `/unlock` — stop and restore `@everyone` posting, preserving
+  every other permission overwrite on the channel
+- `/slowmode` — rate-limit a channel, with the same duration syntax
+
+### Event logging (`src/cogs/eventlog.py`)
+
+- Message deletions and edits (before/after), bulk deletes, joins and leaves
+- Goes to its own channel (`/set_eventlog`), kept separate from the mod log so
+  a busy edit feed doesn't bury the record of what moderators did
+- New accounts are flagged on join
+
+### Gatekeeper (`src/cogs/gatekeeper.py`)
+
+- **Minimum account age** — turn away accounts younger than a threshold. It
+  kicks rather than bans, because a false positive should be recoverable
+- **Raid alerts** — watches the join rate and reports a spike to the mod log,
+  with a cooldown so a sustained raid produces one alert, not one per joiner
+- Both configured with `/gatekeeper`, both off by default
 
 ### Honeypot (`src/cogs/automod.py`)
 
@@ -98,9 +134,13 @@ via `aiosqlite` (WAL mode).
 ### Configuration (`src/cogs/admin.py`)
 
 - `/set_modlog` — channel for moderation embeds and transcripts
+- `/set_eventlog` — channel for message and member event logging
+- `/set_staff_role` — the role exempt from automod and granted ticket access
 - `/set_honeypot` / `/clear_honeypot`
 - `/ticket_config` — set the ticket category and staff role
 - `/set_warn_thresholds` — tune auto-kick / auto-ban
+- `/set_warn_expiry` — how long a warning counts
+- `/antispam`, `/gatekeeper` — spam and join-time protection
 - `/config` — show current settings
 
 ---
@@ -385,6 +425,8 @@ warden-bot/
 │   │   ├── bot.py                WardenBot: wiring, lifecycle, cog discovery
 │   │   ├── settings.py           environment parsed and validated once
 │   │   ├── checks.py             permission decorators, hierarchy guards
+│   │   ├── duration.py           "2h30m" -> timedelta, and back
+│   │   ├── pagination.py         paginated embed view
 │   │   ├── embeds.py             embed builders with Discord-safe truncation
 │   │   ├── responses.py          reply/fail/DM helpers
 │   │   ├── errors.py             global app-command error handler
@@ -392,17 +434,22 @@ warden-bot/
 │   │   └── cog.py                WardenCog base with typed services
 │   ├── services/                 cross-cutting concerns shared by cogs
 │   │   ├── guild_config.py       cached per-guild config (single owner)
-│   │   ├── modlog.py             mod-log delivery
+│   │   ├── modlog.py             mod-log and event-log delivery
 │   │   ├── escalation.py         warning-threshold auto-kick / auto-ban
-│   │   └── word_filter.py        obfuscation-tolerant matching
+│   │   ├── spam.py               flood / repetition / mass-mention detection
+│   │   ├── raid.py               join-rate tracking
+│   │   └── word_filter.py        obfuscation-tolerant per-guild matching
 │   ├── data/
 │   │   ├── db.py                 aiosqlite repository + migrations
-│   │   ├── models.py             GuildConfig / WarningRecord / Ticket
+│   │   ├── models.py             GuildConfig / Case / Ticket
 │   │   └── bad_words.txt         filter word list — edit freely
 │   └── cogs/                     one Discord feature each, auto-discovered
 │       ├── admin.py              per-server config
-│       ├── moderation.py         kick / ban / warn family
-│       ├── automod.py            language filter + honeypot
+│       ├── moderation.py         kick / ban / timeout / warn / purge / cases
+│       ├── automod.py            language, spam and invite filters + honeypot
+│       ├── channels.py           lock / unlock / slowmode
+│       ├── eventlog.py           message and member event logging
+│       ├── gatekeeper.py         account-age gate and raid alerts
 │       ├── tickets.py            ticket panel + private channels
 │       ├── user_info.py          /userinfo, /avatar, context menu
 │       ├── documentation.py      /documentation, generated from the tree
@@ -498,6 +545,15 @@ either FFmpeg is not on `PATH` (run `ffmpeg -version` to confirm) or your
 **Music: bot joins VC but plays nothing.** Missing `PyNaCl` or libopus.
 Reinstall with `pip install --force-reinstall "discord.py[voice]"`.
 
+**Upgrading from an older version.** The database migrates itself on start.
+v1 warnings become numbered cases; nothing is lost, and the upgrade is covered
+by `tests/test_migration.py`. Back the file up first anyway.
+
+**Someone stayed banned after their `/tempban` expired.** Discord has no
+native expiring ban, so the bot lifts it from a background sweep every minute.
+Check that the bot still has **Ban Members** and is still in the server; the
+case stays active until the unban succeeds, so it retries.
+
 **Reset everything.** Stop the bot and delete `data/bot.sqlite3` (plus the
 `-wal` and `-shm` sidecar files if present). All per-server config,
 warnings, and ticket records will be wiped on next start.
@@ -506,8 +562,10 @@ warnings, and ticket records will be wiped on next start.
 
 ## Notes
 
-- `/warn` from automod uses the bot as the moderator. Language warnings
-  count toward the same auto-escalation thresholds as manual warnings.
+- Automod warnings use the bot as the moderator and count toward the same
+  auto-escalation thresholds as manual warnings.
+- Every moderation action is a numbered case in one table, which is what lets
+  a warning expire and lets `/case` explain a kick months later.
 - The honeypot exempts every member with mod permissions or the configured
   staff role, so a typo from staff never bans them.
 - Persistent ticket buttons survive restarts because their `custom_id`s are
