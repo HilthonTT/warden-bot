@@ -99,15 +99,28 @@ def test_guild_config_from_row_coerces_the_automod_flag() -> None:
     row = {
         "guild_id": 1,
         "mod_log_channel_id": None,
+        "event_log_channel_id": None,
         "honeypot_channel_id": None,
         "staff_role_id": None,
         "ticket_category_id": None,
         "warn_kick_threshold": 3,
         "warn_ban_threshold": 5,
+        "warn_expiry_days": 0,
         "automod_enabled": 0,
+        "antispam_enabled": 1,
+        "antispam_message_limit": 5,
+        "antispam_window_seconds": 5,
+        "antispam_mention_limit": 5,
+        "invite_filter_enabled": 0,
+        "min_account_age_hours": 0,
+        "raid_join_threshold": 0,
+        "raid_join_window_seconds": 60,
     }
 
-    assert GuildConfig.from_row(row).automod_enabled is False
+    config = GuildConfig.from_row(row)
+
+    assert config.automod_enabled is False
+    assert config.antispam_enabled is True
 
 
 @pytest.fixture
