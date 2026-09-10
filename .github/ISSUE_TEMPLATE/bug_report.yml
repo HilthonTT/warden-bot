@@ -1,0 +1,59 @@
+name: Bug report
+description: Something the bot does wrong
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not paste your bot token, even partially. If you think it
+        leaked, reset it in the Discord developer portal first.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what happened instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run /warn @someone reason
+        2. ...
+    validations:
+      required: true
+
+  - type: input
+    id: command
+    attributes:
+      label: Command or feature
+      placeholder: "/ticket_close, automod, music playback…"
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Run with LOG_LEVEL=DEBUG if you can. Secrets removed.
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Release tag, image tag, or commit SHA.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: How are you running it?
+      options:
+        - Docker / docker compose
+        - Directly with python
+        - Other
+    validations:
+      required: true
