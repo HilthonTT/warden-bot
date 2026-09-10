@@ -75,7 +75,8 @@ def legacy_db(tmp_path: Path) -> Path:
     )
     conn.execute(
         "INSERT INTO tickets (channel_id, guild_id, user_id, number, status, created_at) "
-        "VALUES (300, 10, 1, 7, 'open', 1_700_000_000)"
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (300, 10, 1, 7, "open", 1_700_000_000),
     )
     conn.execute("INSERT INTO ticket_counter (guild_id, last_num) VALUES (10, 7)")
     conn.commit()
