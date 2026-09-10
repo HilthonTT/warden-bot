@@ -1,52 +1,35 @@
-"""
-Async SQLite layer.
+"""Async SQLite storage.
 
-Stores per-guild config, moderator warnings, and active tickets.
-Single connection — discord.py runs on one event loop, so this is safe.
-WAL mode + busy_timeout are enabled for resilience under burst load.
+One connection is shared by the whole bot — discord.py runs everything on a
+single event loop, so there is no thread-safety problem, but coroutines *do*
+interleave at every ``await``. The connection therefore runs in autocommit
+mode (``isolation_level=None``) and every write goes through
+:meth:`Database.transaction`, which holds an :class:`asyncio.Lock`. Without
+that, one coroutine's ``commit()`` could land in the middle of another's
+multi-statement transaction and commit it half-finished.
+
+WAL journalling plus ``busy_timeout`` keep the file usable if an operator
+opens it with the ``sqlite3`` CLI while the bot is running.
 """
+
 from __future__ import annotations
 
-import dataclasses
+import asyncio
+import contextlib
 import logging
-import os
 import time
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Optional
 
 import aiosqlite
 
+from .models import TICKET_STATUS_CLOSED, GuildConfig, Ticket, WarningRecord
+
 log = logging.getLogger(__name__)
 
-DEFAULT_DB_PATH = "data/bot.sqlite3"
-
-# Bump when SCHEMA changes; apply_migrations handles the upgrade path.
 SCHEMA_VERSION = 1
 
-
-@dataclasses.dataclass(slots=True)
-class WarningRecord:
-    id: int
-    guild_id: int
-    user_id: int
-    moderator_id: int
-    reason: str
-    created_at: int
-
-
-@dataclasses.dataclass(slots=True)
-class GuildConfig:
-    guild_id: int
-    mod_log_channel_id: Optional[int] = None
-    honeypot_channel_id: Optional[int] = None
-    staff_role_id: Optional[int] = None
-    ticket_category_id: Optional[int] = None
-    warn_kick_threshold: int = 3
-    warn_ban_threshold: int = 5
-    automod_enabled: bool = True
-
-
-SCHEMA = """
+BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY
 );
@@ -93,45 +76,34 @@ CREATE TABLE IF NOT EXISTS ticket_counter (
 );
 """
 
+MIGRATIONS: tuple[tuple[int, str], ...] = ()
+
 
 class Database:
-    def __init__(self, path: Optional[Path] = None) -> None:
-        # Resolve lazily so env vars loaded after import still take effect.
-        self.path: Path = path or Path(os.getenv("BOT_DB_PATH", DEFAULT_DB_PATH))
+    """Thin, typed repository over the bot's SQLite file."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
         self._conn: aiosqlite.Connection | None = None
+        self._write_lock = asyncio.Lock()
 
     async def connect(self) -> None:
+        """Open the connection, apply pragmas, and bring the schema up to date."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = await aiosqlite.connect(self.path)
+        self._conn = await aiosqlite.connect(self.path, isolation_level=None)
         self._conn.row_factory = aiosqlite.Row
 
-        # Reliability pragmas: WAL + busy_timeout + FK enforcement.
-        await self._conn.execute("PRAGMA journal_mode=WAL;")
-        await self._conn.execute("PRAGMA synchronous=NORMAL;")
-        await self._conn.execute("PRAGMA busy_timeout=5000;")
-        await self._conn.execute("PRAGMA foreign_keys=ON;")
+        for pragma in (
+            "journal_mode=WAL",
+            "synchronous=NORMAL",
+            "busy_timeout=5000",
+            "foreign_keys=ON",
+        ):
+            await self._conn.execute(f"PRAGMA {pragma};")
 
-        await self._conn.executescript(SCHEMA)
-        await self._apply_migrations()
-        await self._conn.commit()
+        await self._conn.executescript(BASE_SCHEMA)
+        await self._migrate()
         log.info("Database ready at %s (schema v%d)", self.path, SCHEMA_VERSION)
-
-    async def _apply_migrations(self) -> None:
-        """Idempotent schema upgrades. SCHEMA itself is CREATE-IF-NOT-EXISTS."""
-        assert self._conn is not None
-        async with self._conn.execute(
-            "SELECT version FROM schema_version LIMIT 1",
-        ) as cur:
-            row = await cur.fetchone()
-        current = row["version"] if row else 0
-
-        # Future migrations go here, gated by `if current < N: ...`.
-        if current != SCHEMA_VERSION:
-            await self._conn.execute("DELETE FROM schema_version;")
-            await self._conn.execute(
-                "INSERT INTO schema_version (version) VALUES (?)",
-                (SCHEMA_VERSION,),
-            )
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -140,109 +112,162 @@ class Database:
 
     @property
     def conn(self) -> aiosqlite.Connection:
-        assert self._conn is not None, "Database not connected — call connect() first"
+        if self._conn is None:
+            raise RuntimeError("Database not connected — call connect() first")
         return self._conn
 
-    # ---------- guild_config ----------
+    async def _migrate(self) -> None:
+        async with self.conn.execute("SELECT version FROM schema_version LIMIT 1") as cur:
+            row = await cur.fetchone()
+        current = int(row["version"]) if row else 0
+
+        for version, statement in MIGRATIONS:
+            if version > current:
+                log.info("Applying migration to schema v%d", version)
+                await self.conn.executescript(statement)
+
+        if current != SCHEMA_VERSION:
+            async with self.transaction() as conn:
+                await conn.execute("DELETE FROM schema_version;")
+                await conn.execute(
+                    "INSERT INTO schema_version (version) VALUES (?)",
+                    (SCHEMA_VERSION,),
+                )
+
+    @contextlib.asynccontextmanager
+    async def transaction(self) -> AsyncIterator[aiosqlite.Connection]:
+        """Serialise a write transaction against every other writer.
+
+        ``BEGIN IMMEDIATE`` takes the write lock up front so a reader can't
+        upgrade mid-transaction and deadlock against a concurrent writer.
+        """
+        async with self._write_lock:
+            await self.conn.execute("BEGIN IMMEDIATE;")
+            try:
+                yield self.conn
+            except BaseException:
+                await self.conn.rollback()
+                raise
+            await self.conn.commit()
 
     async def get_config(self, guild_id: int) -> GuildConfig:
+        """Return the guild's config, materialising defaults on first use."""
         async with self.conn.execute(
-            "SELECT * FROM guild_config WHERE guild_id = ?", (guild_id,),
+            "SELECT * FROM guild_config WHERE guild_id = ?",
+            (guild_id,),
         ) as cur:
             row = await cur.fetchone()
         if row is None:
             cfg = GuildConfig(guild_id=guild_id)
             await self.upsert_config(cfg)
             return cfg
-        return GuildConfig(
-            guild_id=row["guild_id"],
-            mod_log_channel_id=row["mod_log_channel_id"],
-            honeypot_channel_id=row["honeypot_channel_id"],
-            staff_role_id=row["staff_role_id"],
-            ticket_category_id=row["ticket_category_id"],
-            warn_kick_threshold=row["warn_kick_threshold"],
-            warn_ban_threshold=row["warn_ban_threshold"],
-            automod_enabled=bool(row["automod_enabled"]),
-        )
+        return GuildConfig.from_row(row)
 
     async def upsert_config(self, cfg: GuildConfig) -> None:
-        await self.conn.execute(
-            """
-            INSERT INTO guild_config (
-                guild_id, mod_log_channel_id, honeypot_channel_id,
-                staff_role_id, ticket_category_id,
-                warn_kick_threshold, warn_ban_threshold, automod_enabled
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(guild_id) DO UPDATE SET
-                mod_log_channel_id  = excluded.mod_log_channel_id,
-                honeypot_channel_id = excluded.honeypot_channel_id,
-                staff_role_id       = excluded.staff_role_id,
-                ticket_category_id  = excluded.ticket_category_id,
-                warn_kick_threshold = excluded.warn_kick_threshold,
-                warn_ban_threshold  = excluded.warn_ban_threshold,
-                automod_enabled     = excluded.automod_enabled
-            """,
-            (
-                cfg.guild_id, cfg.mod_log_channel_id, cfg.honeypot_channel_id,
-                cfg.staff_role_id, cfg.ticket_category_id,
-                cfg.warn_kick_threshold, cfg.warn_ban_threshold,
-                int(cfg.automod_enabled),
-            ),
-        )
-        await self.conn.commit()
-
-    # ---------- warnings ----------
+        async with self.transaction() as conn:
+            await conn.execute(
+                """
+                INSERT INTO guild_config (
+                    guild_id, mod_log_channel_id, honeypot_channel_id,
+                    staff_role_id, ticket_category_id,
+                    warn_kick_threshold, warn_ban_threshold, automod_enabled
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    mod_log_channel_id  = excluded.mod_log_channel_id,
+                    honeypot_channel_id = excluded.honeypot_channel_id,
+                    staff_role_id       = excluded.staff_role_id,
+                    ticket_category_id  = excluded.ticket_category_id,
+                    warn_kick_threshold = excluded.warn_kick_threshold,
+                    warn_ban_threshold  = excluded.warn_ban_threshold,
+                    automod_enabled     = excluded.automod_enabled
+                """,
+                (
+                    cfg.guild_id,
+                    cfg.mod_log_channel_id,
+                    cfg.honeypot_channel_id,
+                    cfg.staff_role_id,
+                    cfg.ticket_category_id,
+                    cfg.warn_kick_threshold,
+                    cfg.warn_ban_threshold,
+                    int(cfg.automod_enabled),
+                ),
+            )
 
     async def add_warning(
-        self, guild_id: int, user_id: int, mod_id: int, reason: str,
-    ) -> int:
-        async with self.conn.execute(
-            "INSERT INTO warnings (guild_id, user_id, moderator_id, reason, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (guild_id, user_id, mod_id, reason, int(time.time())),
-        ) as cur:
-            wid = cur.lastrowid
-        await self.conn.commit()
-        return wid or 0
+        self,
+        guild_id: int,
+        user_id: int,
+        mod_id: int,
+        reason: str,
+    ) -> tuple[int, int]:
+        """Record a warning.
 
-    async def get_warnings(self, guild_id: int, user_id: int) -> list[WarningRecord]:
-        async with self.conn.execute(
+        Returns:
+            ``(warning_id, total_warnings)`` — the count is read inside the
+            same transaction as the insert, so two concurrent warns can't
+            both report the same total and skip an escalation threshold.
+        """
+        async with self.transaction() as conn:
+            async with conn.execute(
+                "INSERT INTO warnings (guild_id, user_id, moderator_id, reason, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (guild_id, user_id, mod_id, reason, int(time.time())),
+            ) as cur:
+                warning_id = cur.lastrowid or 0
+            async with conn.execute(
+                "SELECT COUNT(*) AS n FROM warnings WHERE guild_id = ? AND user_id = ?",
+                (guild_id, user_id),
+            ) as cur:
+                row = await cur.fetchone()
+        return warning_id, (int(row["n"]) if row else 0)
+
+    async def get_warnings(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        limit: int | None = None,
+    ) -> list[WarningRecord]:
+        sql = (
             "SELECT * FROM warnings WHERE guild_id = ? AND user_id = ? "
-            "ORDER BY created_at DESC, id DESC",
+            "ORDER BY created_at DESC, id DESC"
+        )
+        params: tuple[object, ...] = (guild_id, user_id)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params += (limit,)
+        async with self.conn.execute(sql, params) as cur:
+            rows = await cur.fetchall()
+        return [WarningRecord.from_row(r) for r in rows]
+
+    async def count_warnings(self, guild_id: int, user_id: int) -> int:
+        """Total warnings without loading every row (used on the hot path)."""
+        async with self.conn.execute(
+            "SELECT COUNT(*) AS n FROM warnings WHERE guild_id = ? AND user_id = ?",
             (guild_id, user_id),
         ) as cur:
-            rows = await cur.fetchall()
-        return [
-            WarningRecord(
-                id=r["id"],
-                guild_id=r["guild_id"],
-                user_id=r["user_id"],
-                moderator_id=r["moderator_id"],
-                reason=r["reason"],
-                created_at=r["created_at"],
-            )
-            for r in rows
-        ]
+            row = await cur.fetchone()
+        return int(row["n"]) if row else 0
 
     async def clear_warnings(self, guild_id: int, user_id: int) -> int:
-        async with self.conn.execute(
-            "DELETE FROM warnings WHERE guild_id = ? AND user_id = ?",
-            (guild_id, user_id),
-        ) as cur:
-            count = cur.rowcount
-        await self.conn.commit()
-        return count
+        async with (
+            self.transaction() as conn,
+            conn.execute(
+                "DELETE FROM warnings WHERE guild_id = ? AND user_id = ?",
+                (guild_id, user_id),
+            ) as cur,
+        ):
+            return cur.rowcount
 
     async def remove_warning(self, guild_id: int, warning_id: int) -> bool:
-        async with self.conn.execute(
-            "DELETE FROM warnings WHERE guild_id = ? AND id = ?",
-            (guild_id, warning_id),
-        ) as cur:
-            ok = cur.rowcount > 0
-        await self.conn.commit()
-        return ok
-
-    # ---------- tickets ----------
+        async with (
+            self.transaction() as conn,
+            conn.execute(
+                "DELETE FROM warnings WHERE guild_id = ? AND id = ?",
+                (guild_id, warning_id),
+            ) as cur,
+        ):
+            return cur.rowcount > 0
 
     async def get_open_ticket(self, guild_id: int, user_id: int) -> int | None:
         async with self.conn.execute(
@@ -253,56 +278,52 @@ class Database:
             row = await cur.fetchone()
         return row["channel_id"] if row else None
 
-    async def create_ticket(
-        self, channel_id: int, guild_id: int, user_id: int,
-    ) -> int:
-        """Atomically allocate the next ticket number and insert the row.
+    async def create_ticket(self, channel_id: int, guild_id: int, user_id: int) -> int:
+        """Allocate the next ticket number and insert the row atomically.
 
-        The per-guild counter avoids the MAX(number)+1 race; the UNIQUE
-        partial index on (guild_id, user_id) WHERE status='open' protects
-        against double-open from concurrent button clicks.
-        Returns the allocated ticket number.
+        The per-guild counter avoids the ``MAX(number)+1`` race; the UNIQUE
+        partial index on open tickets is the storage-layer backstop against a
+        double-click opening two tickets.
+
+        Returns:
+            The allocated ticket number.
         """
-        try:
-            await self.conn.execute("BEGIN IMMEDIATE;")
-            await self.conn.execute(
-                "INSERT INTO ticket_counter (guild_id, last_num) VALUES (?, 0) "
-                "ON CONFLICT(guild_id) DO NOTHING",
+        async with self.transaction() as conn:
+            await conn.execute(
+                "INSERT INTO ticket_counter (guild_id, last_num) VALUES (?, 1) "
+                "ON CONFLICT(guild_id) DO UPDATE SET last_num = last_num + 1",
                 (guild_id,),
             )
-            await self.conn.execute(
-                "UPDATE ticket_counter SET last_num = last_num + 1 "
-                "WHERE guild_id = ?",
-                (guild_id,),
-            )
-            async with self.conn.execute(
+            async with conn.execute(
                 "SELECT last_num FROM ticket_counter WHERE guild_id = ?",
                 (guild_id,),
             ) as cur:
                 row = await cur.fetchone()
             number = int(row["last_num"]) if row else 1
 
-            await self.conn.execute(
+            await conn.execute(
                 "INSERT INTO tickets "
                 "(channel_id, guild_id, user_id, number, status, created_at) "
                 "VALUES (?, ?, ?, ?, 'open', ?)",
                 (channel_id, guild_id, user_id, number, int(time.time())),
             )
-            await self.conn.commit()
-            return number
-        except Exception:
-            await self.conn.rollback()
-            raise
+        return number
 
-    async def close_ticket(self, channel_id: int) -> None:
-        await self.conn.execute(
-            "UPDATE tickets SET status = 'closed' WHERE channel_id = ?",
-            (channel_id,),
-        )
-        await self.conn.commit()
+    async def close_ticket(self, channel_id: int) -> bool:
+        """Mark a ticket closed. False if it was already closed or unknown."""
+        async with (
+            self.transaction() as conn,
+            conn.execute(
+                "UPDATE tickets SET status = ? WHERE channel_id = ? AND status != ?",
+                (TICKET_STATUS_CLOSED, channel_id, TICKET_STATUS_CLOSED),
+            ) as cur,
+        ):
+            return cur.rowcount > 0
 
-    async def get_ticket(self, channel_id: int) -> aiosqlite.Row | None:
+    async def get_ticket(self, channel_id: int) -> Ticket | None:
         async with self.conn.execute(
-            "SELECT * FROM tickets WHERE channel_id = ?", (channel_id,),
+            "SELECT * FROM tickets WHERE channel_id = ?",
+            (channel_id,),
         ) as cur:
-            return await cur.fetchone()
+            row = await cur.fetchone()
+        return Ticket.from_row(row) if row else None
