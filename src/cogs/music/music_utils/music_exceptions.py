@@ -1,11 +1,15 @@
-from discord.ext import commands
+"""Music-specific errors."""
 
-class VCError(commands.CommandError):
-    """
-    Exception class for connection errors.
-    """
+from __future__ import annotations
 
-class InvalidVC(VCError):
-    """
-    Exception class for invalid VCs.
-    """
+
+class MusicError(Exception):
+    """Base class for music failures that are safe to show to a user."""
+
+
+class TrackResolveError(MusicError):
+    """yt-dlp could not turn a query into a playable track."""
+
+
+class VoiceConnectError(MusicError):
+    """The bot could not join or move to a voice channel."""

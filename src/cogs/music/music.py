@@ -1,316 +1,281 @@
-"""
-Music commands.
+"""Music commands.
 
-Exposes:
-  /join [channel]    — bot joins a voice channel (yours by default)
-  /play  <search>    — search and play a song
-  /pause             — pause playback
-  /resume            — resume playback
-  /skip              — skip the current song
-  /queue             — show the next few queued songs
-  /nowplaying        — show the currently playing song
-  /volume <volume>   — set playback volume (1-100)
-  /stop              — clear the queue and disconnect
+  /join [channel]   — join a voice channel (yours by default)
+  /play <search>    — search for a song and queue it
+  /pause, /resume   — pause and resume playback
+  /skip             — skip the current song
+  /queue            — show what's coming up
+  /nowplaying       — show the current song
+  /volume <1-100>   — set playback volume
+  /stop             — clear the queue and disconnect
+
+The bot also leaves on its own once the voice channel empties, and after five
+minutes with nothing queued.
 """
+
 from __future__ import annotations
 
-import itertools
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
+from core.cog import MonitorCog
+from core.constants import EMBED_FIELD_VALUE_MAX, truncate
+from core.embeds import info_embed
+from core.responses import fail, reply
+
 from .music_player import MusicPlayer
-from .music_utils import YTDLSource
+from .music_utils import MusicError, resolve_track
+
+if TYPE_CHECKING:
+    from core.bot import MonitorBot
 
 log = logging.getLogger(__name__)
 
+QUEUE_PREVIEW = 10
 
-class Music(commands.Cog):
+
+class Music(MonitorCog):
     """🎵 Music commands."""
 
-    def __init__(self, bot: commands.Bot) -> None:
-        self.bot = bot
+    def __init__(self, bot: MonitorBot) -> None:
+        super().__init__(bot)
         self.players: dict[int, MusicPlayer] = {}
 
     async def cog_unload(self) -> None:
         for guild_id in list(self.players):
-            guild = self.bot.get_guild(guild_id)
-            if guild is not None:
-                await self._cleanup(guild)
+            await self.teardown(guild_id)
 
-    # ---------- internal helpers ----------
+    async def teardown(self, guild_id: int) -> None:
+        """Stop a guild's player and leave its voice channel."""
+        player = self.players.pop(guild_id, None)
+        if player is not None:
+            await player.stop()
 
-    async def _cleanup(self, guild: discord.Guild) -> None:
-        """Disconnect from voice and drop this guild's player."""
-        try:
-            if guild.voice_client is not None:
-                await guild.voice_client.disconnect(force=False)
-        except discord.HTTPException:
-            log.debug("Voice disconnect failed", exc_info=True)
-        self.players.pop(guild.id, None)
+        guild = self.bot.get_guild(guild_id)
+        voice = guild.voice_client if guild is not None else None
+        if voice is not None:
+            try:
+                await voice.disconnect(force=False)
+            except discord.HTTPException:
+                log.debug("Voice disconnect failed for guild %s", guild_id, exc_info=True)
 
-    def _get_player(
+    async def _on_player_finished(self, guild_id: int) -> None:
+        """Called by a player when its loop ends on its own (idle/disconnect)."""
+        self.players.pop(guild_id, None)
+        await self.teardown(guild_id)
+
+    def _player_for(
         self,
         guild: discord.Guild,
         channel: discord.abc.Messageable,
     ) -> MusicPlayer:
         player = self.players.get(guild.id)
         if player is None:
-            player = MusicPlayer(bot=self.bot, guild=guild, channel=channel, cog=self)
+            player = MusicPlayer(
+                bot=self.bot,
+                guild=guild,
+                channel=channel,
+                on_finished=self._on_player_finished,
+            )
             self.players[guild.id] = player
         return player
 
-    async def _ensure_voice(
+    async def _connect(
         self,
         interaction: discord.Interaction,
-        channel: Optional[discord.VoiceChannel] = None,
-    ) -> Optional[discord.VoiceClient]:
-        """Connect to (or move to) the requested or invoker's voice channel.
+        channel: discord.VoiceChannel | None = None,
+    ) -> discord.VoiceClient | None:
+        """Join (or move to) the requested channel, or the invoker's own.
 
-        Returns None if no channel could be resolved.
+        Returns None when no channel can be resolved or the bot lacks access;
+        the caller has already been told why.
         """
-        assert interaction.guild is not None
-        if channel is None:
-            user_voice = (
-                interaction.user.voice
-                if isinstance(interaction.user, discord.Member)
-                else None
-            )
-            channel = user_voice.channel if user_voice else None
-        if channel is None:
-            return None
-
-        vc = interaction.guild.voice_client
-        if vc is not None:
-            if vc.channel.id != channel.id:
-                await vc.move_to(channel)
-            return vc  # type: ignore[return-value]
-        return await channel.connect()
-
-    @staticmethod
-    def _connected_vc(
-        interaction: discord.Interaction,
-    ) -> Optional[discord.VoiceClient]:
         guild = interaction.guild
-        if guild is None:
-            return None
-        vc = guild.voice_client
-        if vc is None or not vc.is_connected():
-            return None
-        return vc  # type: ignore[return-value]
+        assert guild is not None
 
-    # ---------- /join ----------
-    @app_commands.command(
-        name="join",
-        description="Have the bot join a voice channel.",
-    )
+        if channel is None:
+            voice_state = (
+                interaction.user.voice if isinstance(interaction.user, discord.Member) else None
+            )
+            channel = voice_state.channel if voice_state else None  # type: ignore[assignment]
+        if channel is None:
+            await fail(interaction, "Join a voice channel first, or name one.")
+            return None
+
+        me = guild.me
+        if me is not None:
+            permissions = channel.permissions_for(me)
+            if not (permissions.connect and permissions.speak):
+                await fail(
+                    interaction,
+                    f"I need **Connect** and **Speak** in {channel.mention}.",
+                )
+                return None
+
+        voice = guild.voice_client
+        try:
+            if isinstance(voice, discord.VoiceClient) and voice.is_connected():
+                if voice.channel.id != channel.id:
+                    await voice.move_to(channel)
+                return voice
+            return await channel.connect()
+        except (discord.ClientException, discord.HTTPException, TimeoutError) as exc:
+            log.warning("Voice connect failed in guild %s", guild.id, exc_info=True)
+            await fail(interaction, f"Couldn't join that voice channel: {exc}")
+            return None
+
+    def _connected(self, interaction: discord.Interaction) -> discord.VoiceClient | None:
+        guild = interaction.guild
+        voice = guild.voice_client if guild is not None else None
+        if isinstance(voice, discord.VoiceClient) and voice.is_connected():
+            return voice
+        return None
+
+    @app_commands.command(name="join", description="Have the bot join a voice channel.")
     @app_commands.describe(channel="The voice channel to join. Defaults to yours.")
     @app_commands.guild_only()
     async def join(
         self,
         interaction: discord.Interaction,
-        channel: Optional[discord.VoiceChannel] = None,
-    ) -> None:
-        try:
-            vc = await self._ensure_voice(interaction, channel)
-        except discord.HTTPException as exc:
-            await interaction.response.send_message(
-                f"❌ Failed to join voice channel: {exc}", ephemeral=True,
-            )
-            return
-
-        if vc is None:
-            await interaction.response.send_message(
-                "❌ Join a voice channel or specify one.", ephemeral=True,
-            )
-            return
-
-        embed = discord.Embed(
-            title="🎧 Connected",
-            description=f"```🎶 Channel: {vc.channel.name}```",
-            color=discord.Color.blurple(),
-        )
-        embed.set_footer(text="❓ Use /stop to disconnect me at any time.")
-        await interaction.response.send_message(embed=embed)
-
-    # ---------- /play ----------
-    @app_commands.command(
-        name="play",
-        description="Search and play a song in a voice channel.",
-    )
-    @app_commands.describe(search="A song name or URL.")
-    @app_commands.guild_only()
-    async def play(
-        self,
-        interaction: discord.Interaction,
-        search: str,
+        channel: discord.VoiceChannel | None = None,
     ) -> None:
         await interaction.response.defer(thinking=True)
-        assert interaction.guild is not None
+        voice = await self._connect(interaction, channel)
+        if voice is None:
+            return
+
+        embed = info_embed("🎧 Connected", f"Joined **{voice.channel.name}**.")
+        embed.set_footer(text="Use /stop to disconnect me at any time.")
+        await reply(interaction, embed=embed)
+
+    @app_commands.command(name="play", description="Search and play a song.")
+    @app_commands.describe(search="A song name or URL.")
+    @app_commands.guild_only()
+    async def play(self, interaction: discord.Interaction, search: str) -> None:
+        guild = interaction.guild
+        assert guild is not None
+        await interaction.response.defer(thinking=True)
+
+        voice = await self._connect(interaction)
+        if voice is None:
+            return
+
+        channel = interaction.channel
+        if not isinstance(channel, discord.abc.Messageable):
+            await fail(interaction, "I can't post playback updates in this channel.")
+            return
 
         try:
-            vc = await self._ensure_voice(interaction)
-        except discord.HTTPException as exc:
-            await interaction.followup.send(
-                f"❌ Failed to join voice channel: {exc}", ephemeral=True,
-            )
-            return
-        if vc is None:
-            await interaction.followup.send(
-                "❌ Join a voice channel first.", ephemeral=True,
-            )
+            track = await resolve_track(search, interaction.user, loop=self.bot.loop)
+        except MusicError as exc:
+            await fail(interaction, f"Couldn't queue that: {exc}")
             return
 
-        assert interaction.channel is not None
-        player = self._get_player(interaction.guild, interaction.channel)
-        try:
-            source = await YTDLSource.create_source(
-                interaction, search, loop=self.bot.loop, download=False,
-            )
-        except Exception as exc:
-            log.exception("YTDL failed for search %r", search)
-            await interaction.followup.send(
-                f"❌ Couldn't fetch that song: {exc}", ephemeral=True,
-            )
+        player = self._player_for(guild, channel)
+        if not player.enqueue(track):
+            await fail(interaction, "The queue is full — try again after a few songs.")
             return
 
-        await player.queue.put(source)
+        embed = info_embed(
+            "🎧 Added to the queue",
+            f"🎹 **{track.title}**\n`{track.duration_label}` • position {len(player.queue)}",
+        )
+        embed.set_footer(text=f"Requested by {track.requester_name}")
+        await reply(interaction, embed=embed)
 
-    # ---------- /pause ----------
     @app_commands.command(name="pause", description="Pause the current song.")
     @app_commands.guild_only()
     async def pause(self, interaction: discord.Interaction) -> None:
-        vc = self._connected_vc(interaction)
-        if vc is None or not vc.is_playing():
-            await interaction.response.send_message(
-                "❌ I'm not currently playing anything.", ephemeral=True,
-            )
+        voice = self._connected(interaction)
+        if voice is None or not voice.is_playing():
+            await fail(interaction, "I'm not playing anything right now.")
             return
-        if vc.is_paused():
-            await interaction.response.send_message(
-                "❌ Already paused.", ephemeral=True,
-            )
-            return
-        vc.pause()
-        embed = discord.Embed(
-            title="🎧 Paused",
-            description=f"⏸️ Paused by **{interaction.user.name}**",
-            color=discord.Color.blurple(),
+        voice.pause()
+        await reply(
+            interaction,
+            embed=info_embed("⏸️ Paused", f"Paused by **{interaction.user.display_name}**"),
         )
-        await interaction.response.send_message(embed=embed)
 
-    # ---------- /resume ----------
     @app_commands.command(name="resume", description="Resume playback.")
     @app_commands.guild_only()
     async def resume(self, interaction: discord.Interaction) -> None:
-        vc = self._connected_vc(interaction)
-        if vc is None:
-            await interaction.response.send_message(
-                "❌ I'm not connected to voice.", ephemeral=True,
-            )
+        voice = self._connected(interaction)
+        if voice is None:
+            await fail(interaction, "I'm not connected to voice.")
             return
-        if not vc.is_paused():
-            await interaction.response.send_message(
-                "❌ I'm not paused.", ephemeral=True,
-            )
+        if not voice.is_paused():
+            await fail(interaction, "I'm not paused.")
             return
-        vc.resume()
-        embed = discord.Embed(
-            title="🎧 Resumed",
-            description=f"▶️ Resumed by **{interaction.user.name}**",
-            color=discord.Color.blurple(),
+        voice.resume()
+        await reply(
+            interaction,
+            embed=info_embed("▶️ Resumed", f"Resumed by **{interaction.user.display_name}**"),
         )
-        await interaction.response.send_message(embed=embed)
 
-    # ---------- /skip ----------
     @app_commands.command(name="skip", description="Skip the current song.")
     @app_commands.guild_only()
     async def skip(self, interaction: discord.Interaction) -> None:
-        vc = self._connected_vc(interaction)
-        if vc is None or not (vc.is_playing() or vc.is_paused()):
-            await interaction.response.send_message(
-                "❌ I'm not currently playing anything.", ephemeral=True,
-            )
+        voice = self._connected(interaction)
+        if voice is None or not (voice.is_playing() or voice.is_paused()):
+            await fail(interaction, "I'm not playing anything right now.")
             return
-        vc.stop()
-        embed = discord.Embed(
-            title="🎧 Skipped",
-            description=f"⏭️ Skipped by **{interaction.user.name}**",
-            color=discord.Color.blurple(),
+        voice.stop()
+        await reply(
+            interaction,
+            embed=info_embed("⏭️ Skipped", f"Skipped by **{interaction.user.display_name}**"),
         )
-        await interaction.response.send_message(embed=embed)
 
-    # ---------- /queue ----------
-    @app_commands.command(
-        name="queue",
-        description="Show the next songs in the queue.",
-    )
+    @app_commands.command(name="queue", description="Show the next songs in the queue.")
     @app_commands.guild_only()
     async def queue(self, interaction: discord.Interaction) -> None:
-        assert interaction.guild is not None
-        if self._connected_vc(interaction) is None:
-            await interaction.response.send_message(
-                "❌ I'm not connected to voice.", ephemeral=True,
-            )
+        guild = interaction.guild
+        assert guild is not None
+
+        player = self.players.get(guild.id)
+        upcoming = player.upcoming if player is not None else []
+        if player is None or not upcoming:
+            await fail(interaction, "Nothing is queued.")
             return
 
-        player = self.players.get(interaction.guild.id)
-        if player is None or player.queue.empty():
-            await interaction.response.send_message(
-                "❌ There are no more queued songs.", ephemeral=True,
-            )
-            return
+        lines = [
+            f"**{index}.** {truncate(track.title, 80)} `{track.duration_label}`"
+            for index, track in enumerate(upcoming[:QUEUE_PREVIEW], start=1)
+        ]
+        if len(upcoming) > QUEUE_PREVIEW:
+            lines.append(f"…and {len(upcoming) - QUEUE_PREVIEW} more")
 
-        upcoming = list(itertools.islice(player.queue._queue, 0, 5))
-        fmt = "\n\n".join(
-            f"➡️ **{i + 1}**: {song['title']}" for i, song in enumerate(upcoming)
+        embed = info_embed(
+            f"🎧 Queue — {len(upcoming)} song(s)",
+            truncate("\n".join(lines), EMBED_FIELD_VALUE_MAX),
         )
-        embed = discord.Embed(
-            title=f"🎧 Music Queue | {len(upcoming)} Songs",
-            description=fmt,
-            color=discord.Color.blurple(),
-        )
-        embed.set_footer(text="❓ Use /skip to jump to the next song.")
-        await interaction.response.send_message(embed=embed)
+        if player.current is not None:
+            embed.set_footer(text=f"Now playing: {player.current.title}")
+        await reply(interaction, embed=embed)
 
-    # ---------- /nowplaying ----------
-    @app_commands.command(
-        name="nowplaying",
-        description="Show the song that's currently playing.",
-    )
+    @app_commands.command(name="nowplaying", description="Show the current song.")
     @app_commands.guild_only()
     async def nowplaying(self, interaction: discord.Interaction) -> None:
-        assert interaction.guild is not None
-        vc = self._connected_vc(interaction)
-        player = self.players.get(interaction.guild.id)
-        if vc is None or player is None or player.current is None or vc.source is None:
-            await interaction.response.send_message(
-                "❌ I'm not currently playing anything.", ephemeral=True,
-            )
+        guild = interaction.guild
+        assert guild is not None
+
+        player = self.players.get(guild.id)
+        if self._connected(interaction) is None or player is None or player.current is None:
+            await fail(interaction, "I'm not playing anything right now.")
             return
 
-        if player.np is not None:
-            try:
-                await player.np.delete()
-            except discord.HTTPException:
-                pass
-
-        embed = discord.Embed(
-            title=f"🎧 Now Playing: {vc.source.title}",
-            description=f"🎵 Requested by: **{vc.source.requester.name}**",
-            color=discord.Color.blurple(),
+        track = player.current
+        embed = info_embed(
+            "🎧 Now Playing",
+            f"🎵 **{track.title}**\n`{track.duration_label}`",
         )
-        await interaction.response.send_message(embed=embed)
-        player.np = await interaction.original_response()
+        embed.set_footer(text=f"Requested by {track.requester_name}")
+        await reply(interaction, embed=embed)
 
-    # ---------- /volume ----------
-    @app_commands.command(
-        name="volume",
-        description="Set the player volume (1-100).",
-    )
+    @app_commands.command(name="volume", description="Set the player volume (1-100).")
     @app_commands.describe(volume="Playback volume between 1 and 100.")
     @app_commands.guild_only()
     async def volume(
@@ -318,43 +283,67 @@ class Music(commands.Cog):
         interaction: discord.Interaction,
         volume: app_commands.Range[int, 1, 100],
     ) -> None:
-        assert interaction.guild is not None
-        vc = self._connected_vc(interaction)
-        if vc is None:
-            await interaction.response.send_message(
-                "❌ I'm not connected to voice.", ephemeral=True,
-            )
+        guild = interaction.guild
+        assert guild is not None
+        if self._connected(interaction) is None:
+            await fail(interaction, "I'm not connected to voice.")
             return
 
-        player = self.players.get(interaction.guild.id)
-        if vc.source is not None:
-            vc.source.volume = volume / 100
-        if player is not None:
-            player.volume = volume / 100
+        player = self.players.get(guild.id)
+        if player is None:
+            await fail(interaction, "There's no active player to adjust.")
+            return
+        player.set_volume(volume / 100)
 
-        embed = discord.Embed(
-            title="🎧 Volume Changed",
-            description=f"🔊 **{interaction.user.name}** set the volume to *{volume}%*",
-            color=discord.Color.blurple(),
+        await reply(
+            interaction,
+            embed=info_embed(
+                "🔊 Volume changed",
+                f"**{interaction.user.display_name}** set the volume to **{volume}%**",
+            ),
         )
-        await interaction.response.send_message(embed=embed)
 
-    # ---------- /stop ----------
     @app_commands.command(
         name="stop",
         description="Clear the queue and disconnect from voice.",
     )
     @app_commands.guild_only()
     async def stop(self, interaction: discord.Interaction) -> None:
-        assert interaction.guild is not None
-        if self._connected_vc(interaction) is None:
-            await interaction.response.send_message(
-                "❌ I'm not connected to voice.", ephemeral=True,
-            )
+        guild = interaction.guild
+        assert guild is not None
+        if self._connected(interaction) is None and guild.id not in self.players:
+            await fail(interaction, "I'm not connected to voice.")
             return
-        await self._cleanup(interaction.guild)
-        await interaction.response.send_message("👋 Disconnected.")
+
+        await interaction.response.defer(thinking=True)
+        await self.teardown(guild.id)
+        await reply(interaction, "👋 Queue cleared and disconnected.")
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ) -> None:
+        """Leave once the bot is alone, instead of idling in an empty channel."""
+        voice = member.guild.voice_client
+        if not isinstance(voice, discord.VoiceClient):
+            return
+
+        if self.bot.user is not None and member.id == self.bot.user.id:
+            if after.channel is None:
+                await self.teardown(member.guild.id)
+            return
+
+        if before.channel is None or before.channel.id != voice.channel.id:
+            return
+        if any(not m.bot for m in before.channel.members):
+            return
+
+        log.info("Voice channel empty in guild %s — leaving", member.guild.id)
+        await self.teardown(member.guild.id)
 
 
-async def setup(bot: commands.Bot) -> None:
+async def setup(bot: MonitorBot) -> None:
     await bot.add_cog(Music(bot))
