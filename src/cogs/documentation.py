@@ -25,8 +25,10 @@ if TYPE_CHECKING:
 
 TIERS: tuple[tuple[str, str | None], ...] = (
     ("📖 Everyone", None),
+    ("🔇 Moderator — Moderate Members", "moderate_members"),
     ("🛡️ Moderator — Kick Members", "kick_members"),
     ("⚖️ Senior Moderator — Ban Members", "ban_members"),
+    ("🧹 Staff — Manage Messages", "manage_messages"),
     ("🎟️ Staff — Manage Channels", "manage_channels"),
     ("👑 Administrator — Manage Server", "manage_guild"),
 )
@@ -40,6 +42,9 @@ def required_permission(command: app_commands.Command) -> str | None:
     :func:`core.checks.guild_permissions` sets alongside the runtime check.
     """
     declared = getattr(command, "default_permissions", None)
+    if declared is None:
+        parent = getattr(command, "parent", None)
+        declared = getattr(parent, "default_permissions", None)
     if declared is None:
         return None
     for _, permission in TIERS:
