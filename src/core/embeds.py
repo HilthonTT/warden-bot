@@ -79,3 +79,16 @@ def success_embed(title: str, description: str | None = None) -> discord.Embed:
 
 def info_embed(title: str, description: str | None = None) -> discord.Embed:
     return base_embed(title, color=discord.Color.blurple(), description=description)
+
+
+def channel_label(channel: object) -> str:
+    """A channel mention when the type has one, else a readable name.
+
+    Message events can arrive from channel types that have no ``mention``
+    (a DM, a group channel), and a log line is not worth an AttributeError.
+    """
+    mention = getattr(channel, "mention", None)
+    if mention:
+        return str(mention)
+    name = getattr(channel, "name", None)
+    return f"#{name}" if name else "an unknown channel"

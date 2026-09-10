@@ -10,7 +10,14 @@ import discord
 from discord.ext import commands
 
 from data.db import Database
-from services import EscalationService, GuildConfigService, ModLogService
+from services import (
+    EscalationService,
+    GuildConfigService,
+    ModLogService,
+    RaidTracker,
+    SpamTracker,
+    WordFilterService,
+)
 
 from .errors import on_app_command_error
 from .settings import Settings
@@ -75,7 +82,10 @@ class WardenBot(commands.Bot):
         self.db = Database(settings.db_path)
         self.config = GuildConfigService(self.db)
         self.modlog = ModLogService(self.config)
-        self.escalation = EscalationService(self.modlog)
+        self.escalation = EscalationService(self.db, self.modlog)
+        self.words = WordFilterService(self.db)
+        self.spam = SpamTracker()
+        self.raid = RaidTracker()
         self._session: aiohttp.ClientSession | None = None
 
     @property
@@ -153,3 +163,6 @@ class WardenBot(commands.Bot):
 
     async def on_guild_remove(self, guild: discord.Guild) -> None:
         self.config.invalidate(guild.id)
+        self.words.invalidate(guild.id)
+        self.spam.clear_guild(guild.id)
+        self.raid.forget(guild.id)

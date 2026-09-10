@@ -23,13 +23,26 @@ class ModLogService:
     async def channel(self, guild: discord.Guild) -> discord.TextChannel | None:
         """Resolve the guild's mod-log channel, or None if unset/deleted."""
         cfg = await self._config.get(guild.id)
-        if cfg.mod_log_channel_id is None:
+        return self._resolve(guild, cfg.mod_log_channel_id)
+
+    async def event_channel(self, guild: discord.Guild) -> discord.TextChannel | None:
+        """Resolve the guild's event-log channel for message and member events.
+
+        Kept separate from the mod log so a busy edit/delete feed doesn't bury
+        the record of what moderators actually did.
+        """
+        cfg = await self._config.get(guild.id)
+        return self._resolve(guild, cfg.event_log_channel_id)
+
+    @staticmethod
+    def _resolve(guild: discord.Guild, channel_id: int | None) -> discord.TextChannel | None:
+        if channel_id is None:
             return None
-        chan = guild.get_channel(cfg.mod_log_channel_id)
+        chan = guild.get_channel(channel_id)
         if not isinstance(chan, discord.TextChannel):
             log.debug(
-                "Mod log channel %s for guild %s is missing or not a text channel",
-                cfg.mod_log_channel_id,
+                "Log channel %s in guild %s is missing or not a text channel",
+                channel_id,
                 guild.id,
             )
             return None
@@ -49,6 +62,21 @@ class ModLogService:
             payload (ticket transcripts) branch on this.
         """
         chan = await self.channel(guild)
+        return await self._deliver(guild, chan, embed, file=file)
+
+    async def send_event(self, guild: discord.Guild, embed: discord.Embed) -> bool:
+        """Post to the event log, if the guild has configured one."""
+        chan = await self.event_channel(guild)
+        return await self._deliver(guild, chan, embed, file=None)
+
+    async def _deliver(
+        self,
+        guild: discord.Guild,
+        chan: discord.TextChannel | None,
+        embed: discord.Embed,
+        *,
+        file: discord.File | None,
+    ) -> bool:
         if chan is None:
             return False
         try:

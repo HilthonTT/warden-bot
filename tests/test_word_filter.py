@@ -43,7 +43,7 @@ def test_normalize(raw: str, expected: str) -> None:
     ],
 )
 def test_matches_bypasses(words_file: Path, text: str) -> None:
-    assert WordFilter(words_file).matches(text)
+    assert WordFilter(path=words_file).matches(text)
 
 
 @pytest.mark.parametrize(
@@ -57,7 +57,7 @@ def test_matches_bypasses(words_file: Path, text: str) -> None:
     ],
 )
 def test_ignores_clean_text(words_file: Path, text: str) -> None:
-    assert not WordFilter(words_file).matches(text)
+    assert not WordFilter(path=words_file).matches(text)
 
 
 def test_load_words_skips_comments_blanks_and_duplicates(words_file: Path) -> None:
@@ -65,7 +65,7 @@ def test_load_words_skips_comments_blanks_and_duplicates(words_file: Path) -> No
 
 
 def test_missing_word_list_disables_the_filter(tmp_path: Path) -> None:
-    word_filter = WordFilter(tmp_path / "nope.txt")
+    word_filter = WordFilter(path=tmp_path / "nope.txt")
     assert not word_filter.active
     assert not word_filter.matches("fuck")
 
@@ -76,7 +76,7 @@ def test_empty_word_list_builds_no_pattern() -> None:
 
 
 def test_reload_picks_up_edits(words_file: Path) -> None:
-    word_filter = WordFilter(words_file)
+    word_filter = WordFilter(path=words_file)
     assert not word_filter.matches("banana")
 
     words_file.write_text("banana\n", encoding="utf-8")
@@ -86,11 +86,11 @@ def test_reload_picks_up_edits(words_file: Path) -> None:
 
 
 def test_find_returns_the_offending_word(words_file: Path) -> None:
-    assert WordFilter(words_file).find("oh sh!t") == "shit"
+    assert WordFilter(path=words_file).find("oh sh!t") == "shit"
 
 
 def test_long_input_is_bounded(words_file: Path) -> None:
     from services.word_filter import MAX_INPUT_LEN
 
     padding = "a" * (MAX_INPUT_LEN + 100)
-    assert not WordFilter(words_file).matches(padding + " fuck")
+    assert not WordFilter(path=words_file).matches(padding + " fuck")

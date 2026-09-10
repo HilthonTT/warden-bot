@@ -25,6 +25,8 @@ import logging
 import re
 from pathlib import Path
 
+from data.db import Database
+
 log = logging.getLogger(__name__)
 
 DEFAULT_WORDS_FILE = Path(__file__).resolve().parent.parent / "data" / "bad_words.txt"
@@ -93,11 +95,10 @@ def build_pattern(words: list[str]) -> re.Pattern[str] | None:
 class WordFilter:
     """Holds the compiled word list and answers "is this message a hit?"."""
 
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(self, words: list[str] | None = None, path: Path | None = None) -> None:
         self._path = path or DEFAULT_WORDS_FILE
-        self.words: list[str] = []
-        self._pattern: re.Pattern[str] | None = None
-        self.reload()
+        self.words: list[str] = words if words is not None else load_words(self._path)
+        self._pattern: re.Pattern[str] | None = build_pattern(self.words)
 
     def reload(self) -> int:
         """Re-read the word list from disk. Returns the number of words loaded."""
@@ -119,3 +120,64 @@ class WordFilter:
 
     def matches(self, text: str) -> bool:
         return self.find(text) is not None
+
+
+class WordFilterService:
+    """Per-guild word lists layered over the shared defaults from disk.
+
+    One file on disk could not express two communities with different
+    standards, so each guild adds and removes its own words through
+    ``/words``. Compiled patterns are cached because this runs on every
+    message; a guild's cache entry is dropped whenever its list changes.
+    """
+
+    def __init__(self, db: Database, path: Path | None = None) -> None:
+        self._db = db
+        self._path = path or DEFAULT_WORDS_FILE
+        self.defaults: list[str] = load_words(self._path)
+        self._cache: dict[int, WordFilter] = {}
+        log.info("Word filter seeded with %d default word(s)", len(self.defaults))
+
+    async def _filter_for(self, guild_id: int) -> WordFilter:
+        cached = self._cache.get(guild_id)
+        if cached is not None:
+            return cached
+        custom = await self._db.get_words(guild_id)
+        word_filter = WordFilter(words=[*self.defaults, *custom], path=self._path)
+        self._cache[guild_id] = word_filter
+        return word_filter
+
+    async def find(self, guild_id: int, text: str) -> str | None:
+        """Return the offending word for this guild's list, or None."""
+        return (await self._filter_for(guild_id)).find(text)
+
+    async def matches(self, guild_id: int, text: str) -> bool:
+        return await self.find(guild_id, text) is not None
+
+    async def custom_words(self, guild_id: int) -> list[str]:
+        return await self._db.get_words(guild_id)
+
+    async def add(self, guild_id: int, words: list[str]) -> int:
+        added = await self._db.add_words(guild_id, words)
+        self.invalidate(guild_id)
+        return added
+
+    async def remove(self, guild_id: int, word: str) -> bool:
+        removed = await self._db.remove_word(guild_id, word)
+        self.invalidate(guild_id)
+        return removed
+
+    async def clear(self, guild_id: int) -> int:
+        cleared = await self._db.clear_words(guild_id)
+        self.invalidate(guild_id)
+        return cleared
+
+    def invalidate(self, guild_id: int) -> None:
+        self._cache.pop(guild_id, None)
+
+    def reload_defaults(self) -> int:
+        """Re-read the seed list from disk and drop every compiled pattern."""
+        self.defaults = load_words(self._path)
+        self._cache.clear()
+        log.info("Word filter reloaded %d default word(s)", len(self.defaults))
+        return len(self.defaults)

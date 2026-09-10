@@ -8,7 +8,14 @@ from discord.ext import commands
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to type checkers
     from data.db import Database
-    from services import EscalationService, GuildConfigService, ModLogService
+    from services import (
+        EscalationService,
+        GuildConfigService,
+        ModLogService,
+        RaidTracker,
+        SpamTracker,
+        WordFilterService,
+    )
 
     from .bot import WardenBot
 
@@ -38,3 +45,15 @@ class WardenCog(commands.Cog):
     @property
     def escalation(self) -> EscalationService:
         return self.bot.escalation
+
+    @property
+    def words(self) -> WordFilterService:
+        return self.bot.words
+
+    @property
+    def spam(self) -> SpamTracker:
+        return self.bot.spam
+
+    @property
+    def raid(self) -> RaidTracker:
+        return self.bot.raid
