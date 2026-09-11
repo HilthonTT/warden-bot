@@ -31,6 +31,11 @@ _VALID_RE = re.compile(r"^(?:\s*\d+\s*[smhdw]\s*)+$", re.IGNORECASE)
 
 DISCORD_MAX_TIMEOUT = timedelta(days=28)
 
+#: Anything longer is a typo, not an intent. The cap also keeps
+#: ``timedelta`` from raising :class:`OverflowError` on absurd input
+#: (``9999999999w``), which used to surface as "something went wrong".
+MAX_DURATION_DAYS = 3_650
+
 
 class DurationError(ValueError):
     """The supplied duration could not be understood."""
@@ -40,7 +45,8 @@ def parse_duration(text: str) -> timedelta:
     """Parse ``10m``, ``2h30m``, ``7d`` into a :class:`~datetime.timedelta`.
 
     Raises:
-        DurationError: on an empty, malformed, or zero-length duration.
+        DurationError: on an empty, malformed, zero-length, or
+            unreasonably long duration.
     """
     cleaned = text.strip()
     if not cleaned:
@@ -57,6 +63,10 @@ def parse_duration(text: str) -> timedelta:
 
     if seconds <= 0:
         raise DurationError("The duration must be longer than zero.")
+    if seconds > MAX_DURATION_DAYS * UNIT_SECONDS["d"]:
+        raise DurationError(
+            f"That's too long — use at most {MAX_DURATION_DAYS} days (`{MAX_DURATION_DAYS}d`)."
+        )
     return timedelta(seconds=seconds)
 
 

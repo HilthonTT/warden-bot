@@ -39,10 +39,15 @@ def _install_signal_handlers(loop: asyncio.AbstractEventLoop, bot: WardenBot) ->
     ``add_signal_handler`` is POSIX-only; on Windows we fall back to the
     default KeyboardInterrupt path, which ``main`` already handles.
     """
+    closing: set[asyncio.Task[None]] = set()
 
     def request_close() -> None:
         log.info("Signal received, shutting down…")
-        loop.create_task(bot.close())
+        # Hold a reference: a bare create_task() may be garbage collected
+        # before it runs, which would drop the shutdown entirely.
+        task = loop.create_task(bot.close())
+        closing.add(task)
+        task.add_done_callback(closing.discard)
 
     for name in ("SIGTERM", "SIGINT"):
         sig = getattr(signal, name, None)
@@ -55,6 +60,9 @@ def _install_signal_handlers(loop: asyncio.AbstractEventLoop, bot: WardenBot) ->
 
 
 async def run() -> int:
+    # Loading here rather than under ``__main__`` so the ``warden-bot``
+    # console script gets the same .env treatment as ``python src/bot.py``.
+    load_dotenv()
     try:
         settings = Settings.from_env()
     except ConfigError as exc:
@@ -87,5 +95,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    load_dotenv()
     sys.exit(main())

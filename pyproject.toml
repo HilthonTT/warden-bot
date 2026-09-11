@@ -84,6 +84,15 @@ ignore_missing_imports = true
 module = ["discord.*", "yt_dlp.*", "aiosqlite.*"]
 ignore_missing_imports = true
 
+# Editors (Pylance/pyright) need the same source root that ruff, mypy and
+# pytest are already told about: the code lives in src/ but is imported as
+# `core`, `cogs`, `data`, `services`. Without this, every test import shows
+# as unresolved even though the suite runs.
+[tool.pyright]
+include = ["src", "tests"]
+extraPaths = ["src"]
+pythonVersion = "3.11"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

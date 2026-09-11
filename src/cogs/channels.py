@@ -11,6 +11,8 @@ a channel is a moderation action even though it targets no one in particular.
 from __future__ import annotations
 
 import logging
+import re
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import discord
@@ -31,7 +33,24 @@ log = logging.getLogger(__name__)
 NO_REASON = "No reason provided"
 SLOWMODE_MAX_SECONDS = 21_600
 
+#: Accepted ways to ask for slowmode to be turned off; see
+#: :func:`clears_slowmode`.
+SLOWMODE_OFF_WORDS = frozenset({"off", "none", "clear", "0"})
+ZERO_DURATION_RE = re.compile(r"^0+\s*[smhdw]?$", re.IGNORECASE)
+
 Lockable = discord.TextChannel | discord.VoiceChannel | discord.ForumChannel
+
+
+def clears_slowmode(text: str) -> bool:
+    """Whether ``text`` asks for slowmode to be turned off.
+
+    ``/slowmode`` documents 0 as "clear", so every spelling of zero has to
+    mean the same thing: ``0s`` and ``0m`` used to reach
+    :func:`~core.duration.parse_duration` and come back as the unhelpful
+    "the duration must be longer than zero".
+    """
+    cleaned = text.strip()
+    return cleaned.lower() in SLOWMODE_OFF_WORDS or ZERO_DURATION_RE.match(cleaned) is not None
 
 
 class Channels(WardenCog):
@@ -157,7 +176,7 @@ class Channels(WardenCog):
             await fail(interaction, "Slowmode only applies to text channels.")
             return
 
-        cleared = delay.strip() in {"0", "off", "none"}
+        cleared = clears_slowmode(delay)
         if cleared:
             seconds = 0
         else:
@@ -183,7 +202,7 @@ class Channels(WardenCog):
             await fail(interaction, f"Discord error: {exc}")
             return
 
-        spelled = "off" if seconds == 0 else format_duration(parse_duration(f"{seconds}s"))
+        spelled = "off" if seconds == 0 else format_duration(timedelta(seconds=seconds))
         embed = base_embed(
             "🐌 Slowmode updated",
             color=discord.Color.blurple(),

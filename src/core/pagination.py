@@ -8,11 +8,8 @@ this instead.
 from __future__ import annotations
 
 import logging
-from typing import TypeVar
 
 import discord
-
-T = TypeVar("T")
 
 log = logging.getLogger(__name__)
 
@@ -102,10 +99,3 @@ class Paginator(discord.ui.View):
             await self.message.edit(view=self)
         except discord.HTTPException:
             log.debug("Could not disable a timed-out paginator", exc_info=True)
-
-
-def chunk(items: list[T], size: int) -> list[list[T]]:
-    """Split ``items`` into lists of at most ``size``."""
-    if size <= 0:
-        raise ValueError("size must be positive")
-    return [items[start : start + size] for start in range(0, len(items), size)] or [[]]

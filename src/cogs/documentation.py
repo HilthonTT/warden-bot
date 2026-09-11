@@ -16,7 +16,7 @@ import discord
 from discord import app_commands
 
 from core.cog import WardenCog
-from core.constants import EMBED_FIELD_VALUE_MAX, EMBED_MAX_FIELDS
+from core.constants import EMBED_FIELD_VALUE_MAX, EMBED_MAX_FIELDS, EMBED_TOTAL_MAX
 from core.embeds import add_field, info_embed
 from core.responses import reply
 
@@ -131,9 +131,16 @@ class Documentation(WardenCog):
 
             lines = [f"`/{c.qualified_name}` — {c.description}" for c in entries]
             for index, block in enumerate(chunk_lines(lines)):
-                if fields >= EMBED_MAX_FIELDS:
+                name = title if index == 0 else f"{title} (cont.)"
+                # Discord caps an embed's *total* text at 6000 characters as
+                # well as its field count, and rejects the whole message when
+                # either is exceeded.
+                if (
+                    fields >= EMBED_MAX_FIELDS
+                    or len(embed) + len(name) + len(block) > EMBED_TOTAL_MAX
+                ):
                     break
-                add_field(embed, title if index == 0 else f"{title} (cont.)", block)
+                add_field(embed, name, block)
                 fields += 1
 
         if fields == 0:

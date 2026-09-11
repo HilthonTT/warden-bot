@@ -51,6 +51,12 @@ SECONDS_PER_DAY = 86_400
 PUNISH_COOLDOWN_SECONDS = 10
 MAX_WORDS_PER_ADD = 25
 
+#: The filter matches on a-z only (see :mod:`services.word_filter`), so an
+#: entry with no letters compiles to nothing and would sit on the list
+#: forever matching nothing while /words add reported it as added.
+HAS_LETTER_RE = re.compile(r"[a-z]", re.IGNORECASE)
+WORD_SPLIT_RE = re.compile(r"[,\s]+")
+
 INVITE_RE = re.compile(
     r"(?:https?://)?(?:www\.)?(?:discord(?:app)?\.com/invite|discord\.gg|discord\.me)/\S+",
     re.IGNORECASE,
@@ -295,18 +301,44 @@ class AutoMod(WardenCog):
     @app_commands.checks.has_permissions(manage_guild=True)
     async def words_add(self, interaction: discord.Interaction, words: str) -> None:
         assert interaction.guild is not None
-        candidates = [part for part in re.split(r"[,\s]+", words) if part][:MAX_WORDS_PER_ADD]
+        candidates, skipped = self._clean_words(words)
         if not candidates:
-            await fail(interaction, "Give at least one word to add.")
+            await fail(
+                interaction,
+                "Give at least one word to add. Entries need at least one letter "
+                "a-z — the filter can't match anything else.",
+            )
             return
 
         added = await self.words.add(interaction.guild.id, candidates)
-        await reply(
-            interaction,
-            f"✅ Added **{added}** new word(s); {len(candidates) - added} were already "
-            f"on the list.",
-            ephemeral=True,
+        message = (
+            f"✅ Added **{added}** new word(s); {len(candidates) - added} were already on the list."
         )
+        if skipped:
+            message += f" Skipped {skipped} entry(ies) with no letters a-z."
+        await reply(interaction, message, ephemeral=True)
+
+    @staticmethod
+    def _clean_words(words: str) -> tuple[list[str], int]:
+        """Split, normalise and de-duplicate input.
+
+        Returns:
+            ``(candidates, skipped)`` — the words worth storing, and how many
+            entries were dropped for holding no matchable letter. De-duplicating
+            here keeps the reported "already on the list" count honest when the
+            same word is given twice.
+        """
+        unique: dict[str, None] = {}
+        skipped = 0
+        for part in WORD_SPLIT_RE.split(words):
+            cleaned = part.strip().lower()
+            if not cleaned:
+                continue
+            if not HAS_LETTER_RE.search(cleaned):
+                skipped += 1
+                continue
+            unique.setdefault(cleaned, None)
+        return list(unique)[:MAX_WORDS_PER_ADD], skipped
 
     @word_list.command(name="remove", description="Remove a word from this server's filter.")
     @app_commands.describe(word="The word to remove.")

@@ -24,7 +24,12 @@ from discord.ext import tasks
 
 from core.checks import guild_permissions, hierarchy_error
 from core.cog import WardenCog
-from core.constants import AUDIT_REASON_MAX, truncate
+from core.constants import (
+    AUDIT_REASON_MAX,
+    EMBED_FIELD_VALUE_MAX,
+    EMBED_TOTAL_MAX,
+    truncate,
+)
 from core.duration import (
     DISCORD_MAX_TIMEOUT,
     DurationError,
@@ -32,7 +37,7 @@ from core.duration import (
     parse_duration,
 )
 from core.embeds import action_embed, add_field, base_embed, info_embed
-from core.pagination import Paginator, chunk
+from core.pagination import Paginator
 from core.responses import fail, reply, try_dm
 from data.models import Case, CaseAction
 
@@ -44,6 +49,10 @@ log = logging.getLogger(__name__)
 NO_REASON = "No reason provided"
 SECONDS_PER_DAY = 86_400
 CASES_PER_PAGE = 8
+#: Discord rejects an embed whose *total* text exceeds 6000 characters, so a
+#: page is closed on whichever limit is hit first. Eight cases with long
+#: reasons used to overflow it and fail the whole command with a 400.
+PAGE_CHAR_BUDGET = EMBED_TOTAL_MAX - 128
 PURGE_MAX = 100
 SWEEP_INTERVAL_SECONDS = 60
 
@@ -538,14 +547,7 @@ class Moderation(WardenCog):
             await reply(interaction, f"{user.mention} has no {noun}.", ephemeral=True)
             return
 
-        pages: list[discord.Embed] = []
-        for group in chunk(records, CASES_PER_PAGE):
-            embed = base_embed(title, color=discord.Color.gold())
-            embed.set_thumbnail(url=user.display_avatar.url)
-            for case in group:
-                add_field(embed, self._case_heading(case), self._case_body(guild, case))
-            pages.append(embed)
-
+        pages = self._case_pages(guild, user, records, title)
         view = Paginator(pages, owner_id=interaction.user.id)
         await reply(
             interaction,
@@ -555,6 +557,35 @@ class Moderation(WardenCog):
         )
         if not view.single_page:
             view.message = await interaction.original_response()
+
+    def _case_pages(
+        self,
+        guild: discord.Guild,
+        user: discord.Member,
+        records: list[Case],
+        title: str,
+    ) -> list[discord.Embed]:
+        """Lay cases out over as many embeds as their length needs."""
+
+        def fresh() -> discord.Embed:
+            embed = base_embed(title, color=discord.Color.gold())
+            embed.set_thumbnail(url=user.display_avatar.url)
+            return embed
+
+        pages: list[discord.Embed] = []
+        page = fresh()
+        for case in records:
+            name = self._case_heading(case)
+            value = truncate(self._case_body(guild, case), EMBED_FIELD_VALUE_MAX)
+            filled = len(page.fields) >= CASES_PER_PAGE
+            overflows = len(page) + len(name) + len(value) > PAGE_CHAR_BUDGET
+            if page.fields and (filled or overflows):
+                pages.append(page)
+                page = fresh()
+            add_field(page, name, value)
+        if page.fields:
+            pages.append(page)
+        return pages
 
     @staticmethod
     def _case_heading(case: Case) -> str:
